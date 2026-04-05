@@ -4,6 +4,8 @@ A keyboard-driven project launcher for [Claude Code](https://claude.com/claude-c
 
 Press **Super+I**, pick a project, and Claude Code opens in a tmux window. All projects share one terminal and one tmux session — switch between them with `Ctrl+B n/p/w`.
 
+![claude-launcher walker picker](docs/screenshot.png)
+
 ## Why
 
 If you use Claude Code across several projects, you end up doing this many times a day:
