@@ -78,6 +78,10 @@ Press **Super+I**. A walker popup appears with:
 - **Select an existing project** → the launcher switches to that project's tmux window (creates it if needed) and focuses the terminal.
 - **Select `+ New project...`** → enter a name (e.g. `myapp` or `acme/webapp`), and it creates `$CLAUDE_LAUNCHER_WORKS_DIR/<ns>/<name>/` and starts Claude there.
 
+![terminal showing multiple project windows in tmux tabs](docs/terminal.png)
+
+Each project gets its own tmux window (visible as tabs at the top). Active Claude sessions persist across terminal closes.
+
 ### Switching projects inside the terminal
 
 With omarchy's default tmux config:
