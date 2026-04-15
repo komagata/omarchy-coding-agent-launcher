@@ -1,50 +1,65 @@
-# omarchy-claude-launcher
+# omarchy-coding-agent-launcher
 
-A keyboard-driven project launcher for [Claude Code](https://claude.com/claude-code) on [omarchy](https://omarchy.org/) / Hyprland.
+A keyboard-driven project launcher for terminal coding agents on [omarchy](https://omarchy.org/) / Hyprland.
 
-Press **Super+I**, pick a project, and Claude Code opens in a tmux window. All projects share one terminal and one tmux session — switch between them with `Alt+1`..`Alt+9` (with omarchy's default tmux config).
+Press **Super+I**, pick a project, and your selected coding agent opens in a tmux pane. All projects share one terminal and one tmux session, so active sessions stay together and can be restored after the terminal closes.
 
-![claude-launcher walker picker](docs/screenshot.png)
+![coding-agent-launcher walker picker](docs/screenshot.png)
+
+## Supported agents
+
+Select the agent with `CODING_AGENT_LAUNCHER_AGENT`:
+
+- `claude` (default)
+- `codex`
+- `gemini`
+- `opencode`
+
+Set a per-project agent by writing `claude`, `codex`, `gemini`, or `opencode` to `.agents/agent` in the project directory. The launcher also provides `+ Set project agent...` in the picker to write this file for you. Projects without `.agents/agent` use `CODING_AGENT_LAUNCHER_AGENT`.
+
+The launcher manages projects and tmux panes; each agent still owns its own authentication, model configuration, permissions, and session storage.
+
+For `claude`, `codex`, and `gemini`, the launcher resumes the most recent conversation for the project directory when possible and starts a fresh session otherwise.
 
 ## Why
 
-If you use Claude Code across several projects, you end up doing this many times a day:
+If you use coding agents across several projects, you end up doing this many times a day:
 
 1. Open a terminal
 2. `cd ~/Works/some-org/some-project`
-3. `claude -c` (or `claude` if it's a new project)
-4. Remember to close the old terminal you left open
+3. Start `claude`, `codex`, `gemini`, or `opencode`
+4. Remember which terminal belongs to which project
 
-This launcher collapses that to one keystroke. It also keeps every project's Claude session inside a single persistent tmux session, so you can walk away and come back without losing state.
+This launcher collapses that to one keystroke and keeps every project in a single persistent tmux session.
 
 ## How it works
 
-- A single tmux session named `claude` holds one window per project.
+- A single tmux session named `coding-agents` holds one tiled pane per project.
 - On first use the launcher spawns a terminal attached to that session.
-- Subsequent invocations add or switch to project windows inside the same terminal, and raise that terminal to the foreground via `hyprctl`.
-- If a Claude Code conversation already exists for a project, the launcher resumes it with `claude -c`. Otherwise it starts a fresh session.
-- When Claude exits (for any reason — trust prompts, `/exit`, errors), you're dropped to a prompt that restarts Claude on Enter or exits on Ctrl-D.
+- Subsequent invocations add or switch to project panes inside the same terminal, and raise that terminal via `hyprctl`.
+- New worktrees are created under `.agents/worktrees/<name>`.
+- Existing `.claude/worktrees` entries are left in place for Claude Code compatibility and appear as `project [name @claude]` if present.
 
 ## Requirements
 
-- [omarchy](https://omarchy.org/) (or any Hyprland setup that provides `walker`, `hyprctl`, and a supported terminal)
+- [omarchy](https://omarchy.org/) or any Hyprland setup with `walker`, `hyprctl`, and a supported terminal
 - `tmux`
-- `claude` ([Claude Code CLI](https://claude.com/claude-code))
-- A terminal emulator supporting `--class` and `-e` (alacritty / ghostty / foot / kitty)
+- One supported coding agent CLI: `claude`, `codex`, `gemini`, or `opencode`
+- A terminal emulator supporting `--title` and `-e` (alacritty / ghostty / foot / kitty)
 
 ## Install
 
 ```bash
-git clone https://github.com/komagata/omarchy-claude-launcher.git
-cd omarchy-claude-launcher
+git clone https://github.com/komagata/omarchy-coding-agent-launcher.git
+cd omarchy-coding-agent-launcher
 ./install.sh
 ```
 
 The installer:
 
 1. Checks dependencies
-2. Copies `bin/claude-launcher` to `~/.local/bin/`
-3. Appends the `Super+I` keybind to `~/.config/hypr/bindings.conf` (with confirmation)
+2. Copies `bin/coding-agent-launcher` to `~/.local/bin/`
+3. Appends the `Super+I` keybind to `~/.config/hypr/bindings.conf` with confirmation
 
 Then reload Hyprland:
 
@@ -55,10 +70,9 @@ hyprctl reload
 ### Manual install
 
 ```bash
-cp bin/claude-launcher ~/.local/bin/
-chmod +x ~/.local/bin/claude-launcher
-# Add this line to ~/.config/hypr/bindings.conf:
-echo 'bindd = SUPER, I, Claude project launcher, exec, claude-launcher' >> ~/.config/hypr/bindings.conf
+cp bin/coding-agent-launcher ~/.local/bin/
+chmod +x ~/.local/bin/coding-agent-launcher
+echo 'bindd = SUPER, I, Coding agent launcher, exec, coding-agent-launcher' >> ~/.config/hypr/bindings.conf
 hyprctl reload
 ```
 
@@ -66,55 +80,76 @@ hyprctl reload
 
 Press **Super+I**. A walker popup appears with:
 
-```
+```text
 + New project...
-● komagata/siro-pc          (active — currently open in tmux)
-● lokka/lokka               (active)
++ New worktree...
++ Set project agent...
+- Delete project/worktree...
+● komagata/siro-pc          (idle)
+⚙ lokka/lokka               (working)
   komagata/rom-sorter       (not open)
-  komagata/bin
-  ...
 ```
 
-- **Select an existing project** → the launcher switches to that project's tmux window (creates it if needed) and focuses the terminal.
-- **Select `+ New project...`** → enter a name (e.g. `myapp` or `acme/webapp`), and it creates `$CLAUDE_LAUNCHER_WORKS_DIR/<ns>/<name>/` and starts Claude there.
-- **Type a name that isn't in the list** → the launcher treats it as a new project and creates it on the spot. With `CLAUDE_LAUNCHER_DEFAULT_NS=me` set, typing `chat` creates `$CLAUDE_LAUNCHER_WORKS_DIR/me/chat/`; otherwise you need the `ns/name` form.
+- **Select an existing project** to switch to its tmux pane, creating it if needed.
+- **Select `+ New project...`** to create `$CODING_AGENT_LAUNCHER_WORKS_DIR/<ns>/<name>/` and start the selected agent there.
+- **Select `+ New worktree...`** to create a git worktree under `.agents/worktrees/<name>`.
+- **Select `+ Set project agent...`** to choose which agent a project or worktree should use.
+- **Type a name that is not listed** to create it on the spot. With `CODING_AGENT_LAUNCHER_DEFAULT_NS=me`, typing `chat` creates `$CODING_AGENT_LAUNCHER_WORKS_DIR/me/chat/`; otherwise use `ns/name`.
 
-![terminal showing multiple project windows in tmux tabs](docs/terminal.png)
-
-Each project gets its own tmux window (visible as tabs at the top). Active Claude sessions persist across terminal closes.
+![terminal showing multiple project panes in tmux](docs/terminal.png)
 
 ### Switching projects inside the terminal
 
 With omarchy's default tmux config:
 
-- `Alt+1` .. `Alt+9` — jump to window by number
-- `Alt+Left` / `Alt+Right` — previous / next window
-- `Ctrl+B w` — window picker (shows names and previews)
-- `Ctrl+B d` — detach (keeps everything running in the background)
-
-Or (vanilla tmux):
-
-- `Ctrl+B n` / `Ctrl+B p` — next / previous window
+- `Alt+Left` / `Alt+Right` - previous / next pane or window, depending on your tmux config
+- `Ctrl+B w` - window picker
+- `Ctrl+B d` - detach and keep everything running in the background
 
 ## Configuration
 
 All configuration is via environment variables. Add these to your shell profile (`~/.bashrc`, `~/.zshrc`):
 
 | Variable | Default | Description |
-|---|---|---|
-| `CLAUDE_LAUNCHER_WORKS_DIR` | `$HOME/Works` | Root directory containing your projects |
-| `CLAUDE_LAUNCHER_DEFAULT_NS` | *(unset)* | Fallback namespace when you type just a bare name on creation |
-| `CLAUDE_LAUNCHER_TERMINAL` | `$TERMINAL`, else `alacritty` | Terminal emulator |
-| `CLAUDE_LAUNCHER_SESSION` | `claude` | tmux session name |
-| `CLAUDE_LAUNCHER_CLAUDE_ARGS` | *(empty)* | Extra arguments passed to every `claude` invocation, e.g. `--dangerously-skip-permissions` |
-| `CLAUDE_LAUNCHER_DEBUG` | *(unset)* | Set to `1` to write debug logs to `/tmp/claude-launcher.log` |
+|---|---:|---|
+| `CODING_AGENT_LAUNCHER_AGENT` | `claude` | Agent to run: `claude`, `codex`, `gemini`, or `opencode` |
+| `CODING_AGENT_LAUNCHER_WORKS_DIR` | `$HOME/Works` | Root directory containing your projects |
+| `CODING_AGENT_LAUNCHER_DEFAULT_NS` | *(unset)* | Fallback namespace when creating a bare project name |
+| `CODING_AGENT_LAUNCHER_TERMINAL` | `$TERMINAL`, else `alacritty` | Terminal emulator |
+| `CODING_AGENT_LAUNCHER_SESSION` | `coding-agents` | tmux session name |
+| `CODING_AGENT_LAUNCHER_AGENT_ARGS` | *(empty)* | Extra arguments passed to every agent invocation |
+| `CODING_AGENT_LAUNCHER_CLAUDE_ARGS` | *(empty)* | Extra arguments for `claude` |
+| `CODING_AGENT_LAUNCHER_CODEX_ARGS` | *(empty)* | Extra arguments for `codex` |
+| `CODING_AGENT_LAUNCHER_GEMINI_ARGS` | *(empty)* | Extra arguments for `gemini` |
+| `CODING_AGENT_LAUNCHER_OPENCODE_ARGS` | *(empty)* | Extra arguments for `opencode` |
+| `CODING_AGENT_LAUNCHER_DEBUG` | *(unset)* | Set to `1` to write debug logs to `/tmp/coding-agent-launcher.log` |
+
+Common args are applied before agent-specific args.
+
+### Per-Project Agents
+
+Create this file inside a project to override `CODING_AGENT_LAUNCHER_AGENT` for that project:
+
+```text
+.agents/agent
+```
+
+The file should contain one supported agent name:
+
+```text
+codex
+```
+
+Worktrees can have their own `.agents/agent`. If a worktree does not define one, it inherits the parent project's `.agents/agent` when present.
+
+Changing this setting affects new panes. If the project is already open in tmux, close that pane and open the project again to start the newly selected agent.
 
 ### Directory layout
 
 The launcher assumes a two-level layout:
 
-```
-$CLAUDE_LAUNCHER_WORKS_DIR/
+```text
+$CODING_AGENT_LAUNCHER_WORKS_DIR/
 ├── <namespace>/
 │   ├── <project-name>/
 │   └── <another-project>/
@@ -122,34 +157,28 @@ $CLAUDE_LAUNCHER_WORKS_DIR/
     └── <project-name>/
 ```
 
-For example:
+If you prefer a flat layout, this launcher does not support it right now.
 
-```
-~/Works/
-├── komagata/
-│   ├── siro-pc/
-│   └── rom-sorter/
-├── lokka/
-│   └── lokka/
-└── fjordllc/
-    └── bootcamp/
+## Session commands
+
+```bash
+coding-agent-launcher --save
+coding-agent-launcher --restore
+coding-agent-launcher --shutdown
 ```
 
-If you prefer a flat layout (one level deep), this launcher isn't for you right now — feel free to open an issue or PR.
+`--shutdown` asks each active agent pane to write a handover note to `HANDOVER.md`, waits briefly for activity to stop, saves the session list, and kills the tmux session.
 
 ## Troubleshooting
 
 **The terminal opens and closes immediately.**
-Your terminal may have `gtk-single-instance=detect` or a similar setting that routes new invocations to an existing process, where the `-e` command isn't honored. Try setting `CLAUDE_LAUNCHER_TERMINAL=alacritty` (alacritty always spawns a fresh process).
-
-**On certain NVIDIA cards, ghostty crashes with `LLVM ERROR` when spawned as a subprocess.**
-This was a mesa/llvmpipe bug that has been resolved in recent versions of ghostty (tested on 1.3.1). If you still encounter it, try adding `async-backend = epoll` to your ghostty config, or fall back to alacritty: `export CLAUDE_LAUNCHER_TERMINAL=alacritty`.
+Your terminal may route new invocations to an existing process where the `-e` command is not honored. Try `export CODING_AGENT_LAUNCHER_TERMINAL=alacritty`.
 
 **The launcher says "Please use ns/name format".**
-Either prefix the name with a namespace (`myorg/myapp`) or set `CLAUDE_LAUNCHER_DEFAULT_NS` in your shell profile.
+Either prefix the name with a namespace (`myorg/myapp`) or set `CODING_AGENT_LAUNCHER_DEFAULT_NS`.
 
 **I want to see what the script is doing.**
-Run `CLAUDE_LAUNCHER_DEBUG=1 claude-launcher` and check `/tmp/claude-launcher.log`.
+Run `CODING_AGENT_LAUNCHER_DEBUG=1 coding-agent-launcher` and check `/tmp/coding-agent-launcher.log`.
 
 ## Contributing
 
@@ -157,4 +186,4 @@ Issues and pull requests welcome. Keep in mind this is an opinionated tool: it t
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

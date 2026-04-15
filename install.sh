@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# install.sh — Install claude-launcher for omarchy/Hyprland users.
+# install.sh — Install coding-agent-launcher for omarchy/Hyprland users.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$SCRIPT_DIR/bin/claude-launcher"
-BIN_DEST="$HOME/.local/bin/claude-launcher"
+BIN_SRC="$SCRIPT_DIR/bin/coding-agent-launcher"
+BIN_DEST="$HOME/.local/bin/coding-agent-launcher"
 HYPR_BINDINGS="$HOME/.config/hypr/bindings.conf"
-KEYBIND_LINE='bindd = SUPER, I, Claude project launcher, exec, claude-launcher'
+KEYBIND_LINE='bindd = SUPER, I, Coding agent launcher, exec, coding-agent-launcher'
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-echo "claude-launcher installer"
-echo "========================="
+echo "coding-agent-launcher installer"
+echo "==============================="
 echo ""
 
 # 1. Check dependencies
@@ -48,9 +48,24 @@ if [[ -z "$term_found" ]]; then
 fi
 green "  OK (terminal: $term_found)"
 
+agent="${CODING_AGENT_LAUNCHER_AGENT:-claude}"
+case "$agent" in
+  claude|codex|gemini|opencode)
+    if ! command -v "$agent" >/dev/null 2>&1; then
+      yellow "  Selected coding agent '$agent' was not found in PATH."
+      echo "  Install it first or set CODING_AGENT_LAUNCHER_AGENT to another supported agent."
+    fi
+    ;;
+  *)
+    red "  Unsupported CODING_AGENT_LAUNCHER_AGENT: $agent"
+    echo "  Use one of: claude, codex, gemini, opencode."
+    exit 1
+    ;;
+esac
+
 # 2. Copy or symlink the script
 echo ""
-read -rp "Install bin/claude-launcher to $BIN_DEST? [Y/n] " ans
+read -rp "Install bin/coding-agent-launcher to $BIN_DEST? [Y/n] " ans
 if [[ "${ans,,}" == "n" ]]; then
   echo "  Skipped."
 else
@@ -75,8 +90,8 @@ fi
 # 3. Add Hyprland keybind
 echo ""
 if [[ -f "$HYPR_BINDINGS" ]]; then
-  if grep -qF "claude-launcher" "$HYPR_BINDINGS"; then
-    yellow "  Keybind for claude-launcher already present in $HYPR_BINDINGS; skipping."
+  if grep -qF "coding-agent-launcher" "$HYPR_BINDINGS"; then
+    yellow "  Keybind for coding-agent-launcher already present in $HYPR_BINDINGS; skipping."
   else
     # Warn if SUPER,I is already bound to something else
     if grep -qE '^\s*bind[dne]?\s*=\s*SUPER\s*,\s*I\b' "$HYPR_BINDINGS"; then
@@ -93,7 +108,7 @@ if [[ -f "$HYPR_BINDINGS" ]]; then
       else
         {
           echo ""
-          echo "# claude-launcher"
+          echo "# coding-agent-launcher"
           echo "$KEYBIND_LINE"
         } >> "$HYPR_BINDINGS"
         green "  Appended. Reload Hyprland with: hyprctl reload"
@@ -111,8 +126,9 @@ green "Done!"
 echo ""
 echo "Optional configuration (add to your shell profile):"
 echo ""
-echo "  export CLAUDE_LAUNCHER_WORKS_DIR=\"\$HOME/Works\""
-echo "  export CLAUDE_LAUNCHER_DEFAULT_NS=\"yourname\"     # optional, see README"
-echo "  export CLAUDE_LAUNCHER_TERMINAL=\"$term_found\""
+echo "  export CODING_AGENT_LAUNCHER_AGENT=\"claude\"      # claude, codex, gemini, opencode"
+echo "  export CODING_AGENT_LAUNCHER_WORKS_DIR=\"\$HOME/Works\""
+echo "  export CODING_AGENT_LAUNCHER_DEFAULT_NS=\"yourname\"     # optional, see README"
+echo "  export CODING_AGENT_LAUNCHER_TERMINAL=\"$term_found\""
 echo ""
 echo "Try it by pressing SUPER+I (after 'hyprctl reload')."

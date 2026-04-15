@@ -1,0 +1,671 @@
+#!/usr/bin/env bash
+# coding-agent-launcher — A project launcher for coding agents on omarchy/Hyprland.
+#
+# Design: A single tmux session (default name "coding-agents") holds one tiled
+# pane per project. On first invocation the launcher opens a terminal attached
+# to the session. Subsequent invocations add or switch to project panes inside
+# the same terminal, and bring its window to the foreground via hyprctl.
+#
+# Directory layout (required): $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
+
+set -euo pipefail
+
+APP_NAME="coding-agent-launcher"
+WORKS="${CODING_AGENT_LAUNCHER_WORKS_DIR:-$HOME/Works}"
+DEFAULT_NS="${CODING_AGENT_LAUNCHER_DEFAULT_NS:-}"
+SESSION="${CODING_AGENT_LAUNCHER_SESSION:-coding-agents}"
+WINDOW="agents"
+TERM_CMD="${CODING_AGENT_LAUNCHER_TERMINAL:-${TERMINAL:-alacritty}}"
+AGENT="${CODING_AGENT_LAUNCHER_AGENT:-claude}"
+COMMON_ARGS="${CODING_AGENT_LAUNCHER_AGENT_ARGS:-}"
+WIN_TITLE="$APP_NAME"
+DEBUG="${CODING_AGENT_LAUNCHER_DEBUG:-}"
+LOG="/tmp/coding-agent-launcher.log"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/coding-agent-launcher"
+SESSION_FILE="$STATE_DIR/session.list"
+WORKTREE_DIR=".agents/worktrees"
+LEGACY_WORKTREE_DIR=".claude/worktrees"
+PROJECT_AGENT_FILE=".agents/agent"
+SUPPORTED_AGENTS="claude codex gemini opencode"
+
+log() {
+  [[ -n "$DEBUG" ]] && echo "$@" >> "$LOG"
+  return 0
+}
+
+notify() {
+  local message="$1"
+  notify-send "$APP_NAME" "$message" 2>/dev/null || true
+}
+
+fail() {
+  local message="$1"
+  notify "$message"
+  echo "$APP_NAME: $message" >&2
+  exit 1
+}
+
+agent_supported() {
+  case "$1" in
+    claude|codex|gemini|opencode) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+agent_cmd() {
+  case "$1" in
+    claude) echo "claude" ;;
+    codex) echo "codex" ;;
+    gemini) echo "gemini" ;;
+    opencode) echo "opencode" ;;
+  esac
+}
+
+agent_extra_args() {
+  local agent="$1"
+  local agent_args=""
+  case "$agent" in
+    claude) agent_args="${CODING_AGENT_LAUNCHER_CLAUDE_ARGS:-}" ;;
+    codex) agent_args="${CODING_AGENT_LAUNCHER_CODEX_ARGS:-}" ;;
+    gemini) agent_args="${CODING_AGENT_LAUNCHER_GEMINI_ARGS:-}" ;;
+    opencode) agent_args="${CODING_AGENT_LAUNCHER_OPENCODE_ARGS:-}" ;;
+  esac
+
+  local extra="$COMMON_ARGS"
+  [[ -n "$agent_args" ]] && extra="${extra:+$extra }$agent_args"
+  echo "$extra"
+}
+
+read_agent_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk 'NF && $1 !~ /^#/ {print $1; exit}' "$file"
+}
+
+project_agent() {
+  local rel="$1"
+  local dir="$2"
+  local agent=""
+
+  agent=$(read_agent_file "$dir/$PROJECT_AGENT_FILE" 2>/dev/null || true)
+  if [[ -z "$agent" ]]; then
+    parse_worktree_rel "$rel"
+    if [[ -n "$PARSED_WT" ]]; then
+      agent=$(read_agent_file "$WORKS/$PARSED_PROJ/$PROJECT_AGENT_FILE" 2>/dev/null || true)
+    fi
+  fi
+  [[ -n "$agent" ]] || agent="$AGENT"
+
+  agent_supported "$agent" || fail "Unsupported agent '$agent' in $PROJECT_AGENT_FILE (use $SUPPORTED_AGENTS)"
+  echo "$agent"
+}
+
+agent_supported "$AGENT" || {
+  echo "$APP_NAME: unsupported agent '$AGENT' (use $SUPPORTED_AGENTS)" >&2
+  exit 1
+}
+
+# Dump all panes' @rel to $SESSION_FILE so the set of open projects can be
+# restored after a reboot via `coding-agent-launcher --restore`.
+save_session() {
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  mkdir -p "$STATE_DIR"
+  local tmp="$SESSION_FILE.tmp"
+  tmux list-panes -t "$SESSION:$WINDOW" -F '#{@rel}' 2>/dev/null \
+    | awk 'NF' > "$tmp" || { rm -f "$tmp"; return 0; }
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    log "save_session: no @rel panes, keeping previous $SESSION_FILE"
+    return 0
+  fi
+  mv "$tmp" "$SESSION_FILE"
+  log "saved session: $(wc -l < "$SESSION_FILE") panes"
+}
+
+# Ask every pane to write a handover note, wait until all become idle, then
+# save the session list and kill the tmux session.
+shutdown_session() {
+  tmux has-session -t "$SESSION" 2>/dev/null || {
+    echo "No active session." >&2
+    exit 0
+  }
+
+  local prompt='【shutdown】これからPCを終了します。最優先で現在の作業状況・次にやるべきこと・注意点を HANDOVER.md に箇条書きで保存してください。保存が終わったら何もせず待機してください。'
+
+  local panes
+  panes=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@rel}' 2>/dev/null | awk -F'|' '$2 != ""')
+  [[ -z "$panes" ]] && {
+    save_session
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    return
+  }
+
+  while IFS='|' read -r idx rel; do
+    log "shutdown send: $rel (idx=$idx)"
+    tmux send-keys -t "$SESSION:$WINDOW.$idx" "$prompt" Enter 2>/dev/null || true
+  done <<< "$panes"
+
+  save_session
+
+  local deadline=$(( $(date +%s) + 120 ))
+  while IFS='|' read -r idx rel; do
+    while :; do
+      local act
+      act=$(agent_activity "$rel")
+      [[ "$act" != "working" ]] && break
+      if (( $(date +%s) >= deadline )); then
+        log "shutdown timeout: $rel"
+        notify "Timeout waiting for: $rel"
+        break
+      fi
+      sleep 2
+    done
+  done <<< "$panes"
+
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  notify "Session saved & killed"
+  log "shutdown complete"
+}
+
+# Reopen every project listed in $SESSION_FILE.
+restore_session() {
+  [[ -f "$SESSION_FILE" ]] || fail "No saved session at $SESSION_FILE"
+  [[ -s "$SESSION_FILE" ]] || fail "Saved session is empty ($SESSION_FILE)"
+
+  local count=0
+  while IFS= read -r rel; do
+    [[ -z "$rel" ]] && continue
+    log "restore_session: opening $rel"
+    open_project "$rel"
+    count=$((count + 1))
+  done < "$SESSION_FILE"
+  log "restore_session: restored $count project(s)"
+  (( count > 0 )) || fail "Saved session contained no valid entries"
+}
+
+# rel ("ns/name" or "ns/name [wt]") -> short pane title.
+pane_title() {
+  local rel="$1"
+  local ns="${rel%%/*}"
+  local base="${rel#*/}"
+  local proj="${base%% \[*}"
+
+  local count
+  count=$(find "$WORKS" -mindepth 2 -maxdepth 2 -type d -name "$proj" -not -path '*/.*' 2>/dev/null | wc -l)
+  if [[ "$count" -gt 1 ]]; then
+    echo "$ns/$base"
+  else
+    echo "$base"
+  fi
+}
+
+# Parse "ns/name [wt]" or "ns/name [wt @claude]" into project, worktree name,
+# and worktree root. New worktrees use .agents; legacy .claude entries stay in
+# place for Claude Code compatibility.
+parse_worktree_rel() {
+  local rel="$1"
+  if [[ "$rel" == *" ["*"]" ]]; then
+    PARSED_PROJ="${rel%% \[*}"
+    local tmp="${rel#*\[}"
+    tmp="${tmp%\]}"
+    if [[ "$tmp" == *" @claude" ]]; then
+      PARSED_WT="${tmp% @claude}"
+      PARSED_WT_ROOT="$LEGACY_WORKTREE_DIR"
+    else
+      PARSED_WT="${tmp% @agents}"
+      PARSED_WT_ROOT="$WORKTREE_DIR"
+    fi
+  else
+    PARSED_PROJ="$rel"
+    PARSED_WT=""
+    PARSED_WT_ROOT=""
+  fi
+}
+
+resolve_dir() {
+  local rel="$1"
+  parse_worktree_rel "$rel"
+  if [[ -n "$PARSED_WT" ]]; then
+    if [[ "$PARSED_WT_ROOT" == "$WORKTREE_DIR" && ! -d "$WORKS/$PARSED_PROJ/$WORKTREE_DIR/$PARSED_WT" && -d "$WORKS/$PARSED_PROJ/$LEGACY_WORKTREE_DIR/$PARSED_WT" ]]; then
+      PARSED_WT_ROOT="$LEGACY_WORKTREE_DIR"
+    fi
+    echo "$WORKS/$PARSED_PROJ/$PARSED_WT_ROOT/$PARSED_WT"
+  else
+    echo "$WORKS/$PARSED_PROJ"
+  fi
+}
+
+find_pane() {
+  local title="$1"
+  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@proj}' 2>/dev/null \
+    | awk -F'|' -v t="$title" '$2 == t {print $1; exit}'
+}
+
+agent_activity() {
+  local rel="$1"
+  local title
+  title=$(pane_title "$rel")
+  local idx
+  idx=$(find_pane "$title")
+  [[ -z "$idx" ]] && { echo "none"; return; }
+
+  local pane_pid
+  pane_pid=$(tmux display-message -p -t "$SESSION:$WINDOW.$idx" '#{pane_pid}' 2>/dev/null)
+  [[ -z "$pane_pid" ]] && { echo "none"; return; }
+
+  local tree agent_pid
+  tree=$(pstree -p "$pane_pid" 2>/dev/null || true)
+  agent_pid=$(echo "$tree" | grep -oP '(claude|codex|gemini|opencode)\(\K\d+' | head -1)
+  [[ -z "$agent_pid" ]] && { echo "none"; return; }
+
+  if pstree -p "$agent_pid" 2>/dev/null | grep -qP 'bash\(\d+\)'; then
+    echo "working"
+  else
+    echo "idle"
+  fi
+}
+
+walker_pick() {
+  local prompt="$1"
+  walker -d -p "$prompt" 2>/dev/null || true
+}
+
+walker_input() {
+  local prompt="$1"
+  printf '' | walker -d -p "$prompt" 2>/dev/null || true
+}
+
+list_projects() {
+  find "$WORKS" -mindepth 2 -maxdepth 2 -type d -not -path '*/.*' 2>/dev/null | while read -r dir; do
+    rel="${dir#$WORKS/}"
+    if [[ -d "$dir/.git" ]]; then
+      d=$(git -C "$dir" log -1 --format=%ct 2>/dev/null || stat -c %Y "$dir")
+    else
+      d=$(stat -c %Y "$dir")
+    fi
+    local activity
+    activity=$(agent_activity "$rel")
+    case "$activity" in
+      working) printf '0a\t%s\t%s\n' "$d" "$rel" ;;
+      idle)    printf '0b\t%s\t%s\n' "$d" "$rel" ;;
+      *)       printf '1\t%s\t%s\n' "$d" "$rel" ;;
+    esac
+    list_worktrees_for_project "$dir" "$rel" "$d"
+  done | sort -k1,1 -k2,2rn | while IFS=$'\t' read -r state _ rel; do
+    case "$state" in
+      0a) echo "⚙ $rel" ;;
+      0b) echo "● $rel" ;;
+      *)  echo "  $rel" ;;
+    esac
+  done
+}
+
+list_worktrees_for_project() {
+  local dir="$1"
+  local rel="$2"
+  local fallback_mtime="$3"
+  local root root_label wt wtname display wtd wt_activity
+  for root in "$WORKTREE_DIR" "$LEGACY_WORKTREE_DIR"; do
+    [[ -d "$dir/$root" ]] || continue
+    root_label="agents"
+    [[ "$root" == "$LEGACY_WORKTREE_DIR" ]] && root_label="claude"
+    for wt in "$dir"/"$root"/*/; do
+      [[ -d "$wt" ]] || continue
+      wtname=$(basename "$wt")
+      display="${rel} [${wtname}]"
+      if [[ "$root" == "$LEGACY_WORKTREE_DIR" || ( -d "$dir/$WORKTREE_DIR/$wtname" && -d "$dir/$LEGACY_WORKTREE_DIR/$wtname" ) ]]; then
+        display="${rel} [${wtname} @${root_label}]"
+      fi
+      wtd=$(stat -c %Y "$wt" 2>/dev/null || echo "$fallback_mtime")
+      wt_activity=$(agent_activity "$display")
+      case "$wt_activity" in
+        working) printf '0a\t%s\t%s\n' "$wtd" "$display" ;;
+        idle)    printf '0b\t%s\t%s\n' "$wtd" "$display" ;;
+        *)       printf '1\t%s\t%s\n' "$wtd" "$display" ;;
+      esac
+    done
+  done
+}
+
+build_inner() {
+  local agent="$1"
+  local dir="$2"
+  local slug
+  slug=$(echo "$dir" | sed 's|/|-|g')
+  local args
+  args=$(agent_extra_args "$agent")
+  case "$agent" in
+    claude)
+      if [[ -d "$HOME/.claude/projects/$slug" ]]; then
+        echo "claude -c $args || claude $args"
+      else
+        echo "claude $args"
+      fi
+      ;;
+    opencode)
+      echo "opencode -c $args || opencode $args"
+      ;;
+    codex)
+      echo "codex resume --last $args || codex $args"
+      ;;
+    gemini)
+      echo "gemini --resume $args || gemini $args"
+      ;;
+  esac
+}
+
+open_project() {
+  local rel="$1"
+  local dir
+  dir=$(resolve_dir "$rel")
+  local agent
+  agent=$(project_agent "$rel" "$dir")
+  local cmd
+  cmd=$(agent_cmd "$agent")
+  command -v "$cmd" >/dev/null 2>&1 || fail "Selected agent command not found: $cmd"
+  local title
+  title=$(pane_title "$rel")
+  local inner
+  inner=$(build_inner "$agent" "$dir")
+  parse_worktree_rel "$rel"
+  local is_wt=""
+  [[ -n "$PARSED_WT" ]] && is_wt=1
+
+  if [[ -n "$is_wt" && ( -f "$dir/docker-compose.yml" || -f "$dir/compose.yml" ) ]]; then
+    local wt_prep='set -a; [ -f .env.local ] && source .env.local; set +a; docker compose --env-file .env.local up -d --build;'
+    inner="$wt_prep $inner"
+  fi
+
+  log "=== $(date) ==="
+  log "agent=$agent rel=$rel dir=$dir title=$title is_wt=$is_wt"
+
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$dir" "bash -lc '$inner'" 2>&1 | tee -a "$LOG" >/dev/null
+    tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
+    tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
+    tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
+    local first_idx
+    first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}' | head -1)
+    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @proj "$title" >/dev/null 2>&1 || true
+    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @rel "$rel" >/dev/null 2>&1 || true
+    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @agent "$agent" >/dev/null 2>&1 || true
+    log "created session=$SESSION pane=$title"
+    save_session
+  else
+    tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
+    tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
+    tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
+    local idx
+    idx=$(find_pane "$title")
+    if [[ -z "$idx" ]]; then
+      if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
+        tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
+      fi
+      tmux split-window -t "$SESSION:$WINDOW" -c "$dir" "bash -lc '$inner'" 2>&1 | tee -a "$LOG" >/dev/null
+      local new_idx
+      new_idx=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_index}')
+      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @proj "$title" >/dev/null 2>&1 || true
+      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @rel "$rel" >/dev/null 2>&1 || true
+      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @agent "$agent" >/dev/null 2>&1 || true
+      tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
+      log "added pane=$title idx=$new_idx"
+      save_session
+    else
+      if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
+        tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
+      fi
+      tmux select-pane -t "$SESSION:$WINDOW.$idx" 2>&1 | tee -a "$LOG" >/dev/null
+      log "selected pane=$title idx=$idx"
+    fi
+  fi
+
+  if tmux list-clients -t "$SESSION" 2>/dev/null | grep -q .; then
+    hyprctl dispatch focuswindow "title:$WIN_TITLE" >/dev/null 2>&1 || true
+    log "focused existing window"
+  else
+    if command -v uwsm-app >/dev/null 2>&1; then
+      setsid uwsm-app -- "$TERM_CMD" \
+        --title="$WIN_TITLE" \
+        -e tmux attach -t "$SESSION" \
+        >/dev/null 2>&1 &
+    else
+      setsid "$TERM_CMD" \
+        --title="$WIN_TITLE" \
+        -e tmux attach -t "$SESSION" \
+        >/dev/null 2>&1 &
+    fi
+    log "launched $TERM_CMD pid=$!"
+  fi
+}
+
+create_from_name() {
+  local input="$1"
+  [[ -z "$input" ]] && exit 0
+
+  local rel
+  if [[ "$input" == */* ]]; then
+    rel="$input"
+  elif [[ -n "$DEFAULT_NS" ]]; then
+    rel="$DEFAULT_NS/$input"
+  else
+    fail "Please use ns/name format (set CODING_AGENT_LAUNCHER_DEFAULT_NS to use a bare name)"
+  fi
+
+  local dir="$WORKS/$rel"
+  mkdir -p "$dir"
+  open_project "$rel"
+}
+
+create_new() {
+  local input
+  input=$(walker_input "Project name (name or ns/name)")
+  create_from_name "$input"
+}
+
+set_project_agent() {
+  local picked
+  picked=$(list_projects | walker_pick "Project/worktree to configure")
+  [[ -z "$picked" ]] && exit 0
+
+  local rel
+  rel=$(strip_project_prefix "$picked")
+
+  local dir
+  dir=$(resolve_dir "$rel")
+  [[ -d "$dir" ]] || fail "Project not found: $rel"
+
+  local agent
+  agent=$(printf '%s\n' $SUPPORTED_AGENTS | walker_pick "Agent for $rel")
+  [[ -z "$agent" ]] && exit 0
+  agent_supported "$agent" || fail "Unsupported agent: $agent"
+
+  mkdir -p "$dir/.agents"
+  printf '%s\n' "$agent" > "$dir/$PROJECT_AGENT_FILE"
+  notify "Agent for $rel: $agent (reopen pane to apply)"
+  log "set project agent: rel=$rel agent=$agent file=$dir/$PROJECT_AGENT_FILE"
+}
+
+list_git_projects() {
+  find "$WORKS" -mindepth 2 -maxdepth 2 -type d -not -path '*/.*' 2>/dev/null | while read -r dir; do
+    [[ -d "$dir/.git" ]] || continue
+    echo "${dir#$WORKS/}"
+  done | sort
+}
+
+create_worktree() {
+  local parent
+  parent=$(list_git_projects | walker_pick "Parent project for new worktree")
+  [[ -z "$parent" ]] && exit 0
+
+  local parent_dir="$WORKS/$parent"
+  [[ -d "$parent_dir/.git" ]] || fail "Not a git repo: $parent"
+
+  local wtname
+  wtname=$(walker_input "Worktree name (branch name)")
+  [[ -z "$wtname" ]] && exit 0
+
+  if ! [[ "$wtname" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    fail "Worktree name must match [a-zA-Z0-9_-]+"
+  fi
+
+  local wt_dir="$parent_dir/$WORKTREE_DIR/$wtname"
+  if [[ -d "$wt_dir" ]]; then
+    notify "Worktree already exists: $wtname"
+    open_project "$parent [$wtname]"
+    return
+  fi
+
+  mkdir -p "$parent_dir/$WORKTREE_DIR"
+  log "git worktree add: $wt_dir (branch=$wtname)"
+  if ! git -C "$parent_dir" worktree add "$wt_dir" -b "$wtname" 2>&1 | tee -a "$LOG"; then
+    git -C "$parent_dir" worktree add "$wt_dir" "$wtname" 2>&1 | tee -a "$LOG" >/dev/null || \
+      fail "Failed to create worktree"
+  fi
+
+  if [[ -f "$wt_dir/docker-compose.yml" || -f "$wt_dir/compose.yml" ]]; then
+    local port
+    port=$(find_free_worktree_port "$parent_dir")
+    [[ -n "$port" ]] || fail "No free port in 3010-3099"
+    local compose_project
+    compose_project=$(echo "${parent}_${wtname}" | tr '/' '_' | tr '[:upper:]' '[:lower:]')
+    cat > "$wt_dir/.env.local" <<EOF
+# Generated by coding-agent-launcher for worktree: $wtname
+WEB_PORT=$port
+COMPOSE_PROJECT_NAME=$compose_project
+EOF
+    log "generated .env.local: WEB_PORT=$port COMPOSE_PROJECT_NAME=$compose_project"
+  fi
+
+  open_project "$parent [$wtname]"
+}
+
+find_free_worktree_port() {
+  local parent_dir="$1"
+  local used=""
+  if [[ -d "$parent_dir/$WORKTREE_DIR" ]]; then
+    for env_file in "$parent_dir"/"$WORKTREE_DIR"/*/.env.local; do
+      [[ -f "$env_file" ]] || continue
+      local p
+      p=$(grep -E '^WEB_PORT=' "$env_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+      [[ -n "$p" ]] && used="$used $p"
+    done
+  fi
+  local port
+  for port in $(seq 3010 3099); do
+    if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":${port}$"; then
+      continue
+    fi
+    if [[ " $used " == *" $port "* ]]; then
+      continue
+    fi
+    echo "$port"
+    return 0
+  done
+  return 1
+}
+
+strip_project_prefix() {
+  local rel="$1"
+  rel="${rel#⚙ }"
+  rel="${rel#● }"
+  rel="${rel#  }"
+  rel="${rel#"${rel%%[![:space:]]*}"}"
+  rel="${rel%"${rel##*[![:space:]]}"}"
+  echo "$rel"
+}
+
+delete_project_or_worktree() {
+  local picked
+  picked=$(list_projects | walker_pick "Delete project/worktree")
+  [[ -z "$picked" ]] && exit 0
+
+  local rel
+  rel=$(strip_project_prefix "$picked")
+
+  local title
+  title=$(pane_title "$rel")
+  local idx
+  idx=$(find_pane "$title")
+  if [[ -n "$idx" ]]; then
+    tmux kill-pane -t "$SESSION:$WINDOW.$idx" 2>/dev/null || true
+    tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
+    log "killed pane=$rel idx=$idx"
+    save_session
+  fi
+
+  if [[ "$rel" == *" ["*"]" ]]; then
+    parse_worktree_rel "$rel"
+    local parent_dir="$WORKS/$PARSED_PROJ"
+    local wt_dir="$parent_dir/$PARSED_WT_ROOT/$PARSED_WT"
+    git -C "$parent_dir" worktree remove "$wt_dir" --force 2>/dev/null || true
+    rm -rf "$wt_dir" 2>/dev/null || true
+    notify "Deleted worktree: $rel"
+    log "deleted worktree: $rel"
+  else
+    local dir="$WORKS/$rel"
+    rm -rf "$dir"
+    notify "Deleted project: $rel"
+    log "deleted project: $rel ($dir)"
+  fi
+}
+
+main() {
+  if [[ "${1:-}" == "--restore" ]]; then
+    restore_session
+    return
+  fi
+  if [[ "${1:-}" == "--save" ]]; then
+    save_session
+    return
+  fi
+  if [[ "${1:-}" == "--shutdown" ]]; then
+    shutdown_session
+    return
+  fi
+
+  local picked
+  picked=$({ echo "+ New project..."; echo "+ New worktree..."; echo "+ Set project agent..."; echo "- Delete project/worktree..."; list_projects; } | walker_pick "Coding agent project (default: $AGENT)")
+  [[ -z "$picked" ]] && exit 0
+
+  if [[ "$picked" == "+ New project..." ]]; then
+    create_new
+    return
+  fi
+
+  if [[ "$picked" == "+ New worktree..." ]]; then
+    create_worktree
+    return
+  fi
+
+  if [[ "$picked" == "+ Set project agent..." ]]; then
+    set_project_agent
+    return
+  fi
+
+  if [[ "$picked" == "- Delete project/worktree..." ]]; then
+    delete_project_or_worktree
+    return
+  fi
+
+  local rel
+  rel=$(strip_project_prefix "$picked")
+
+  if [[ "$rel" == *" ["*"]" ]]; then
+    parse_worktree_rel "$rel"
+    local wt_dir="$WORKS/$PARSED_PROJ/$PARSED_WT_ROOT/$PARSED_WT"
+    if [[ -d "$wt_dir" ]]; then
+      open_project "$rel"
+    else
+      fail "Worktree not found: $rel"
+    fi
+    return
+  fi
+
+  if [[ -d "$WORKS/$rel" ]]; then
+    open_project "$rel"
+  else
+    create_from_name "$rel"
+  fi
+}
+
+main "$@"
