@@ -133,7 +133,7 @@ shutdown_session() {
   local prompt='【shutdown】これからPCを終了します。最優先で現在の作業状況・次にやるべきこと・注意点を HANDOVER.md に箇条書きで保存してください。保存が終わったら何もせず待機してください。'
 
   local panes
-  panes=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@rel}' 2>/dev/null | awk -F'|' '$2 != ""')
+  panes=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@rel}' 2>/dev/null | awk -F'|' '$2 != ""' || true)
   [[ -z "$panes" ]] && {
     save_session
     tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -191,7 +191,7 @@ pane_title() {
   local proj="${base%% \[*}"
 
   local count
-  count=$(find "$WORKS" -mindepth 2 -maxdepth 2 -type d -name "$proj" -not -path '*/.*' 2>/dev/null | wc -l)
+  count=$( (find "$WORKS" -mindepth 2 -maxdepth 2 -type d -name "$proj" -not -path '*/.*' 2>/dev/null || true) | wc -l )
   if [[ "$count" -gt 1 ]]; then
     echo "$ns/$base"
   else
@@ -238,7 +238,7 @@ resolve_dir() {
 find_pane() {
   local title="$1"
   tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@proj}' 2>/dev/null \
-    | awk -F'|' -v t="$title" '$2 == t {print $1; exit}'
+    | awk -F'|' -v t="$title" '$2 == t {print $1; exit}' || true
 }
 
 agent_activity() {
@@ -255,7 +255,7 @@ agent_activity() {
 
   local tree agent_pid
   tree=$(pstree -p "$pane_pid" 2>/dev/null || true)
-  agent_pid=$(echo "$tree" | grep -oP '(claude|codex|gemini|opencode)\(\K\d+' | head -1)
+  agent_pid=$(echo "$tree" | grep -oP '(claude|codex|gemini|opencode)\(\K\d+' | head -1 || true)
   [[ -z "$agent_pid" ]] && { echo "none"; return; }
 
   if pstree -p "$agent_pid" 2>/dev/null | grep -qP 'bash\(\d+\)'; then
@@ -276,7 +276,8 @@ walker_input() {
 }
 
 list_projects() {
-  find "$WORKS" -mindepth 2 -maxdepth 2 -type d -not -path '*/.*' 2>/dev/null | while read -r dir; do
+  mkdir -p "$WORKS"
+  (find "$WORKS" -mindepth 2 -maxdepth 2 -type d -not -path '*/.*' 2>/dev/null || true) | while read -r dir; do
     rel="${dir#$WORKS/}"
     if [[ -d "$dir/.git" ]]; then
       d=$(git -C "$dir" log -1 --format=%ct 2>/dev/null || stat -c %Y "$dir")
@@ -380,41 +381,47 @@ open_project() {
   log "agent=$agent rel=$rel dir=$dir title=$title is_wt=$is_wt"
 
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$dir" "bash -lc '$inner'" 2>&1 | tee -a "$LOG" >/dev/null
-    tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
-    tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
-    tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
-    local first_idx
-    first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}' | head -1)
-    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @proj "$title" >/dev/null 2>&1 || true
-    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @rel "$rel" >/dev/null 2>&1 || true
-    tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @agent "$agent" >/dev/null 2>&1 || true
-    log "created session=$SESSION pane=$title"
-    save_session
+    tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
+      tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
+      tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
+      local first_idx
+      first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}' 2>/dev/null | head -1 || true)
+      if [[ -n "$first_idx" ]]; then
+        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @proj "$title" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @rel "$rel" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @agent "$agent" >/dev/null 2>&1 || true
+      fi
+      log "created session=$SESSION pane=$title"
+      save_session
+    fi
   else
     tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
     tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
     tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
     local idx
-    idx=$(find_pane "$title")
+    idx=$(find_pane "$title" || true)
     if [[ -z "$idx" ]]; then
       if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
         tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
       fi
-      tmux split-window -t "$SESSION:$WINDOW" -c "$dir" "bash -lc '$inner'" 2>&1 | tee -a "$LOG" >/dev/null
+      tmux split-window -t "$SESSION:$WINDOW" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
       local new_idx
-      new_idx=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_index}')
-      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @proj "$title" >/dev/null 2>&1 || true
-      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @rel "$rel" >/dev/null 2>&1 || true
-      tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @agent "$agent" >/dev/null 2>&1 || true
-      tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
-      log "added pane=$title idx=$new_idx"
-      save_session
+      new_idx=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_index}' || true)
+      if [[ -n "$new_idx" ]]; then
+        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @proj "$title" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @rel "$rel" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @agent "$agent" >/dev/null 2>&1 || true
+        tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
+        log "added pane=$title idx=$new_idx"
+        save_session
+      fi
     else
       if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
         tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
       fi
-      tmux select-pane -t "$SESSION:$WINDOW.$idx" 2>&1 | tee -a "$LOG" >/dev/null
+      tmux select-pane -t "$SESSION:$WINDOW.$idx" 2>&1 | tee -a "$LOG" >/dev/null || true
       log "selected pane=$title idx=$idx"
     fi
   fi
@@ -520,6 +527,11 @@ create_worktree() {
   if ! git -C "$parent_dir" worktree add "$wt_dir" -b "$wtname" 2>&1 | tee -a "$LOG"; then
     git -C "$parent_dir" worktree add "$wt_dir" "$wtname" 2>&1 | tee -a "$LOG" >/dev/null || \
       fail "Failed to create worktree"
+  fi
+
+  if command -v mise >/dev/null 2>&1 && [[ -f "$wt_dir/.mise.toml" ]]; then
+    log "mise trust: $wt_dir"
+    mise trust "$wt_dir" >/dev/null 2>&1 || true
   fi
 
   if [[ -f "$wt_dir/docker-compose.yml" || -f "$wt_dir/compose.yml" ]]; then
