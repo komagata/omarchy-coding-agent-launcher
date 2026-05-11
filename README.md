@@ -26,7 +26,7 @@ For `claude`, `codex`, and `gemini`, the launcher resumes the most recent conver
 If you use coding agents across several projects, you end up doing this many times a day:
 
 1. Open a terminal
-2. `cd ~/Works/some-org/some-project`
+2. `cd ~/Projects/some-org/some-project`
 3. Start `claude`, `codex`, `gemini`, or `opencode`
 4. Remember which terminal belongs to which project
 
@@ -113,7 +113,7 @@ All configuration is via environment variables. Add these to your shell profile 
 | Variable | Default | Description |
 |---|---:|---|
 | `CODING_AGENT_LAUNCHER_AGENT` | `claude` | Agent to run: `claude`, `codex`, `gemini`, or `opencode` |
-| `CODING_AGENT_LAUNCHER_WORKS_DIR` | `$HOME/Works` | Root directory containing your projects |
+| `CODING_AGENT_LAUNCHER_WORKS_DIR` | `$HOME/Projects` | Root directory containing your projects |
 | `CODING_AGENT_LAUNCHER_DEFAULT_NS` | *(unset)* | Fallback namespace when creating a bare project name |
 | `CODING_AGENT_LAUNCHER_TERMINAL` | `$TERMINAL`, else `alacritty` | Terminal emulator |
 | `CODING_AGENT_LAUNCHER_SESSION` | `coding-agents` | tmux session name |

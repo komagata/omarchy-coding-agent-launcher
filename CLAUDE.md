@@ -23,7 +23,7 @@ Claude Code / Codex / Gemini CLI / OpenCode などの terminal coding agent を�
 $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
 ```
 
-例: `~/Works/komagata/siro-pc/`, `~/Works/fjordllc/bootcamp/`
+例: `~/Projects/komagata/siro-pc/`, `~/Projects/fjordllc/bootcamp/`
 
 フラット（depth=1）はサポートしない。
 
@@ -32,7 +32,7 @@ $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
 | 変数 | デフォルト |
 |---|---|
 | `CODING_AGENT_LAUNCHER_AGENT` | `claude` |
-| `CODING_AGENT_LAUNCHER_WORKS_DIR` | `$HOME/Works` |
+| `CODING_AGENT_LAUNCHER_WORKS_DIR` | `$HOME/Projects` |
 | `CODING_AGENT_LAUNCHER_DEFAULT_NS` | 未設定（未設定時は `ns/name` 必須）|
 | `CODING_AGENT_LAUNCHER_TERMINAL` | `$TERMINAL` → `alacritty` |
 | `CODING_AGENT_LAUNCHER_SESSION` | `coding-agents` |
