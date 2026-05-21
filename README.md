@@ -169,6 +169,32 @@ coding-agent-launcher --shutdown
 
 `--shutdown` asks each active agent pane to write a handover note to `HANDOVER.md`, waits briefly for activity to stop, saves the session list, and kills the tmux session.
 
+## Shell helpers
+
+Add this to your shell profile (`~/.bashrc`, `~/.zshrc`) to enable helper commands:
+
+```bash
+eval "$(coding-agent-launcher --shell-helpers)"
+```
+
+Then jump to a launcher-managed worktree by name:
+
+```bash
+cawt bug-linkcard
+```
+
+From outside the parent project, or when multiple projects have the same worktree name, include the project:
+
+```bash
+cawt fjordllc/bootcamp bug-linkcard
+```
+
+For scripts, `--worktree-dir` prints the resolved path without changing directory:
+
+```bash
+coding-agent-launcher --worktree-dir fjordllc/bootcamp bug-linkcard
+```
+
 ## Troubleshooting
 
 **The terminal opens and closes immediately.**

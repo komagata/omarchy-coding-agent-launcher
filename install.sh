@@ -130,5 +130,6 @@ echo "  export CODING_AGENT_LAUNCHER_AGENT=\"claude\"      # claude, codex, gemi
 echo "  export CODING_AGENT_LAUNCHER_WORKS_DIR=\"\$HOME/Projects\""
 echo "  export CODING_AGENT_LAUNCHER_DEFAULT_NS=\"yourname\"     # optional, see README"
 echo "  export CODING_AGENT_LAUNCHER_TERMINAL=\"$term_found\""
+echo "  eval \"\$(coding-agent-launcher --shell-helpers)\" # enables: cawt WORKTREE_NAME"
 echo ""
 echo "Try it by pressing SUPER+I (after 'hyprctl reload')."

@@ -235,6 +235,75 @@ resolve_dir() {
   fi
 }
 
+resolve_worktree_dir() {
+  local project=""
+  local wt=""
+
+  case "$#" in
+    1)
+      wt="$1"
+      if git rev-parse --show-toplevel >/dev/null 2>&1; then
+        local top common parent marker
+        top="$(git rev-parse --show-toplevel)"
+        marker="/$WORKTREE_DIR/"
+        if [[ "$top" == "$WORKS"/*"$marker"* ]]; then
+          parent="${top%%"$marker"*}"
+          project="${parent#$WORKS/}"
+        elif [[ "$top" == "$WORKS"/* ]]; then
+          project="${top#$WORKS/}"
+        else
+          common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+          parent="$(dirname "$(dirname "$(dirname "$common")")")"
+          if [[ "$parent" == "$WORKS"/* ]]; then
+            project="${parent#$WORKS/}"
+          fi
+        fi
+      fi
+      ;;
+    2)
+      project="$1"
+      wt="$2"
+      ;;
+    *)
+      fail "Usage: coding-agent-launcher --worktree-dir WORKTREE_NAME | --worktree-dir NS/PROJECT WORKTREE_NAME"
+      ;;
+  esac
+
+  if [[ -n "$project" ]]; then
+    local dir="$WORKS/$project/$WORKTREE_DIR/$wt"
+    [[ -d "$dir" ]] || fail "Worktree not found: $project [$wt]"
+    echo "$dir"
+    return
+  fi
+
+  local matches=()
+  while IFS= read -r dir; do
+    matches+=("$dir")
+  done < <(find "$WORKS" -mindepth 5 -maxdepth 5 -type d -path "*/$WORKTREE_DIR/$wt" 2>/dev/null)
+
+  case "${#matches[@]}" in
+    0) fail "Worktree not found: $wt" ;;
+    1) echo "${matches[0]}" ;;
+    *)
+      {
+        echo "$APP_NAME: multiple worktrees matched. Specify NS/PROJECT:" >&2
+        printf '  %s\n' "${matches[@]#$WORKS/}" >&2
+      }
+      exit 1
+      ;;
+  esac
+}
+
+print_shell_helpers() {
+  cat <<'EOF'
+cawt() {
+  local dir
+  dir="$(coding-agent-launcher --worktree-dir "$@")" || return
+  builtin cd "$dir"
+}
+EOF
+}
+
 find_pane() {
   local title="$1"
   tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@proj}' 2>/dev/null \
@@ -622,6 +691,15 @@ delete_project_or_worktree() {
 }
 
 main() {
+  if [[ "${1:-}" == "--worktree-dir" ]]; then
+    shift
+    resolve_worktree_dir "$@"
+    return
+  fi
+  if [[ "${1:-}" == "--shell-helpers" ]]; then
+    print_shell_helpers
+    return
+  fi
   if [[ "${1:-}" == "--restore" ]]; then
     restore_session
     return
