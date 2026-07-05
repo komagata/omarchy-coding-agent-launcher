@@ -10,11 +10,12 @@ Claude Code / Codex / Gemini CLI / OpenCode などの terminal coding agent を�
 
 ## アーキテクチャ
 
-- **1 キーバインド（Super+I）** → walker popup でプロジェクト選択 → tmux pane で選択中 agent が起動
-- **単一 tmux セッション** `coding-agents` を維持し、1 プロジェクト = 1 pane で管理
+- **1 キーバインド（Super+I）** → walker popup でプロジェクト選択 → tmux の右 pane に選択中 agent が表示
+- **単一 tmux セッション** `coding-agents` を維持し、左 sidebar + 右 active agent pane で管理
+- 非 active agent pane は `agents-hidden` window に退避し、プロセスを生かしたまま切り替える
 - 初回: terminal を起動して session attach / 2回目以降: 同じ terminal 内に pane 追加 + `hyprctl` でフォーカス
 - 起動 agent は `CODING_AGENT_LAUNCHER_AGENT` で固定選択。未設定時は `claude`
-- プロジェクトごとの agent は `<project>/.agents/agent` で上書きできる。worktree は自身の `.agents/agent` がなければ親 project の設定を継承する
+- プロジェクトごとの agent は `~/.coding-agent-launcher` で上書きできる。worktree は自身の設定がなければ親 project の設定を継承する
 - agent 固有の会話履歴・認証・model 設定は各 CLI 側に任せる
 
 ## ディレクトリレイアウト前提（固定 depth=2）
@@ -36,6 +37,7 @@ $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
 | `CODING_AGENT_LAUNCHER_DEFAULT_NS` | 未設定（未設定時は `ns/name` 必須）|
 | `CODING_AGENT_LAUNCHER_TERMINAL` | `$TERMINAL` → `alacritty` |
 | `CODING_AGENT_LAUNCHER_SESSION` | `coding-agents` |
+| `CODING_AGENT_LAUNCHER_CONFIG` | `$HOME/.coding-agent-launcher` |
 | `CODING_AGENT_LAUNCHER_AGENT_ARGS` | 全 agent 共通の追加引数 |
 | `CODING_AGENT_LAUNCHER_CLAUDE_ARGS` | `claude` 専用の追加引数 |
 | `CODING_AGENT_LAUNCHER_CODEX_ARGS` | `codex` 専用の追加引数 |

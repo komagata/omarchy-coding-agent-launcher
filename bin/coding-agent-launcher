@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # coding-agent-launcher — A project launcher for coding agents on omarchy/Hyprland.
 #
-# Design: A single tmux session (default name "coding-agents") holds one tiled
-# pane per project. On first invocation the launcher opens a terminal attached
-# to the session. Subsequent invocations add or switch to project panes inside
-# the same terminal, and bring its window to the foreground via hyprctl.
+# Design: A single tmux session (default name "coding-agents") keeps a sidebar
+# pane on the left and the selected coding-agent pane on the right. Inactive
+# agent panes are parked in a hidden tmux window so their processes keep running.
 #
 # Directory layout (required): $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
 
@@ -15,6 +14,7 @@ WORKS="${CODING_AGENT_LAUNCHER_WORKS_DIR:-$HOME/Projects}"
 DEFAULT_NS="${CODING_AGENT_LAUNCHER_DEFAULT_NS:-}"
 SESSION="${CODING_AGENT_LAUNCHER_SESSION:-coding-agents}"
 WINDOW="agents"
+HIDDEN_WINDOW="agents-hidden"
 TERM_CMD="${CODING_AGENT_LAUNCHER_TERMINAL:-${TERMINAL:-alacritty}}"
 AGENT="${CODING_AGENT_LAUNCHER_AGENT:-claude}"
 COMMON_ARGS="${CODING_AGENT_LAUNCHER_AGENT_ARGS:-}"
@@ -23,9 +23,10 @@ DEBUG="${CODING_AGENT_LAUNCHER_DEBUG:-}"
 LOG="/tmp/coding-agent-launcher.log"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/coding-agent-launcher"
 SESSION_FILE="$STATE_DIR/session.list"
+TERMINAL_LOCK_DIR="$STATE_DIR/terminal-launch.lock"
+CONFIG_FILE="${CODING_AGENT_LAUNCHER_CONFIG:-$HOME/.coding-agent-launcher}"
 WORKTREE_DIR=".agents/worktrees"
 LEGACY_WORKTREE_DIR=".claude/worktrees"
-PROJECT_AGENT_FILE=".agents/agent"
 SUPPORTED_AGENTS="claude codex gemini opencode"
 
 log() {
@@ -76,27 +77,41 @@ agent_extra_args() {
   echo "$extra"
 }
 
-read_agent_file() {
-  local file="$1"
-  [[ -f "$file" ]] || return 1
-  awk 'NF && $1 !~ /^#/ {print $1; exit}' "$file"
+config_agent() {
+  local rel="$1"
+  [[ -f "$CONFIG_FILE" ]] || return 1
+  awk -F'\t' -v rel="$rel" '$1 == "agent" && $2 == rel {print $3; exit}' "$CONFIG_FILE"
+}
+
+set_config_agent() {
+  local rel="$1"
+  local agent="$2"
+
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  local tmp="$CONFIG_FILE.tmp"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    awk -F'\t' -v rel="$rel" 'BEGIN {OFS = FS} !($1 == "agent" && $2 == rel) {print}' "$CONFIG_FILE" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  printf 'agent\t%s\t%s\n' "$rel" "$agent" >> "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
 }
 
 project_agent() {
   local rel="$1"
-  local dir="$2"
   local agent=""
 
-  agent=$(read_agent_file "$dir/$PROJECT_AGENT_FILE" 2>/dev/null || true)
+  agent=$(config_agent "$rel" 2>/dev/null || true)
   if [[ -z "$agent" ]]; then
     parse_worktree_rel "$rel"
     if [[ -n "$PARSED_WT" ]]; then
-      agent=$(read_agent_file "$WORKS/$PARSED_PROJ/$PROJECT_AGENT_FILE" 2>/dev/null || true)
+      agent=$(config_agent "$PARSED_PROJ" 2>/dev/null || true)
     fi
   fi
   [[ -n "$agent" ]] || agent="$AGENT"
 
-  agent_supported "$agent" || fail "Unsupported agent '$agent' in $PROJECT_AGENT_FILE (use $SUPPORTED_AGENTS)"
+  agent_supported "$agent" || fail "Unsupported agent '$agent' in $CONFIG_FILE (use $SUPPORTED_AGENTS)"
   echo "$agent"
 }
 
@@ -111,7 +126,8 @@ save_session() {
   tmux has-session -t "$SESSION" 2>/dev/null || return 0
   mkdir -p "$STATE_DIR"
   local tmp="$SESSION_FILE.tmp"
-  tmux list-panes -t "$SESSION:$WINDOW" -F '#{@rel}' 2>/dev/null \
+  tmux list-panes -a -F '#{session_name}:#{window_name}:#{pane_id}|#{@rel}' 2>/dev/null \
+    | awk -F'|' -v s="$SESSION" '$1 ~ "^" s ":" && $2 != "" {print $2}' \
     | awk 'NF' > "$tmp" || { rm -f "$tmp"; return 0; }
   if [[ ! -s "$tmp" ]]; then
     rm -f "$tmp"
@@ -133,7 +149,7 @@ shutdown_session() {
   local prompt='【shutdown】これからPCを終了します。最優先で現在の作業状況・次にやるべきこと・注意点を HANDOVER.md に箇条書きで保存してください。保存が終わったら何もせず待機してください。'
 
   local panes
-  panes=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@rel}' 2>/dev/null | awk -F'|' '$2 != ""' || true)
+  panes=$(tmux list-panes -a -F '#{session_name}|#{pane_id}|#{@rel}' 2>/dev/null | awk -F'|' -v s="$SESSION" '$1 == s && $3 != "" {print $2 "|" $3}' || true)
   [[ -z "$panes" ]] && {
     save_session
     tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -142,7 +158,7 @@ shutdown_session() {
 
   while IFS='|' read -r idx rel; do
     log "shutdown send: $rel (idx=$idx)"
-    tmux send-keys -t "$SESSION:$WINDOW.$idx" "$prompt" Enter 2>/dev/null || true
+    tmux send-keys -t "$idx" "$prompt" Enter 2>/dev/null || true
   done <<< "$panes"
 
   save_session
@@ -181,6 +197,43 @@ restore_session() {
   done < "$SESSION_FILE"
   log "restore_session: restored $count project(s)"
   (( count > 0 )) || fail "Saved session contained no valid entries"
+}
+
+focus_launcher_window() {
+  hyprctl dispatch focuswindow "title:$WIN_TITLE" >/dev/null 2>&1 || true
+}
+
+launcher_window_exists() {
+  hyprctl clients -j 2>/dev/null | grep -Fq "\"title\": \"$WIN_TITLE\""
+}
+
+launch_terminal_once() {
+  mkdir -p "$STATE_DIR"
+  if mkdir "$TERMINAL_LOCK_DIR" 2>/dev/null; then
+    trap 'rmdir "$TERMINAL_LOCK_DIR" 2>/dev/null || true' RETURN
+
+    if tmux list-clients -t "$SESSION" 2>/dev/null | grep -q . || launcher_window_exists; then
+      focus_launcher_window
+      return
+    fi
+
+    if command -v uwsm-app >/dev/null 2>&1; then
+      setsid uwsm-app -- "$TERM_CMD" \
+        --title="$WIN_TITLE" \
+        -e tmux attach -t "$SESSION" \
+        >/dev/null 2>&1 &
+    else
+      setsid "$TERM_CMD" \
+        --title="$WIN_TITLE" \
+        -e tmux attach -t "$SESSION" \
+        >/dev/null 2>&1 &
+    fi
+    log "launched $TERM_CMD pid=$!"
+    sleep 1
+  else
+    sleep 1
+    focus_launcher_window
+  fi
 }
 
 # rel ("ns/name" or "ns/name [wt]") -> short pane title.
@@ -306,8 +359,89 @@ EOF
 
 find_pane() {
   local title="$1"
-  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}|#{@proj}' 2>/dev/null \
-    | awk -F'|' -v t="$title" '$2 == t {print $1; exit}' || true
+  tmux list-panes -a -F '#{session_name}|#{pane_id}|#{@proj}' 2>/dev/null \
+    | awk -F'|' -v s="$SESSION" -v t="$title" '$1 == s && $3 == t {print $2; exit}' || true
+}
+
+ensure_sidebar() {
+  local sidebar
+  sidebar=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
+    | awk -F'|' '$2 == "sidebar" {print $1; exit}' || true)
+  [[ -n "$sidebar" ]] && return 0
+
+  local first
+  first=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
+  [[ -n "$first" ]] || return 0
+  tmux split-window -h -b -l 28 -t "$first" "$0 --sidebar" >/dev/null 2>&1 || true
+  sidebar=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_id}' 2>/dev/null || true)
+  [[ -n "$sidebar" ]] && tmux set-option -p -t "$sidebar" @role "sidebar" >/dev/null 2>&1 || true
+}
+
+ensure_hidden_window() {
+  tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$HIDDEN_WINDOW" && return 0
+  tmux new-window -d -t "$SESSION" -n "$HIDDEN_WINDOW" "sleep 2147483647" >/dev/null 2>&1 || true
+  local pane
+  pane=$(tmux list-panes -t "$SESSION:$HIDDEN_WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
+  [[ -n "$pane" ]] && tmux set-option -p -t "$pane" @role "hidden-placeholder" >/dev/null 2>&1 || true
+}
+
+hidden_placeholder_pane() {
+  tmux list-panes -t "$SESSION:$HIDDEN_WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
+    | awk -F'|' '$2 == "hidden-placeholder" {print $1; exit}' || true
+}
+
+# fzf reads sidebar_items once per loop iteration and doesn't auto-refresh, so
+# any pane add/remove/switch elsewhere leaves it showing a stale (possibly
+# empty) list until the sidebar pane is force-restarted.
+refresh_sidebar() {
+  local sidebar
+  sidebar=$(sidebar_pane)
+  [[ -n "$sidebar" ]] || return 0
+  tmux respawn-pane -k -t "$sidebar" "$0 --sidebar" >/dev/null 2>&1 || true
+}
+
+setup_tmux_ui() {
+  tmux set-option -t "$SESSION" -g mouse on >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
+  ensure_hidden_window
+  ensure_sidebar
+}
+
+sidebar_pane() {
+  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
+    | awk -F'|' '$2 == "sidebar" {print $1; exit}' || true
+}
+
+active_agent_pane() {
+  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@rel}|#{@role}' 2>/dev/null \
+    | awk -F'|' '$2 != "" && $3 != "sidebar" {print $1; exit}' || true
+}
+
+activate_pane() {
+  local target="$1"
+  local target_window
+  target_window=$(tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null || true)
+  [[ -z "$target_window" ]] && return 0
+
+  local hidden current
+  hidden=$(hidden_placeholder_pane)
+  while IFS= read -r current; do
+    [[ -n "$current" && "$current" != "$target" && -n "$hidden" ]] || continue
+    tmux move-pane -h -s "$current" -t "$hidden" >/dev/null 2>&1 || true
+  done < <(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@rel}|#{@role}' 2>/dev/null \
+    | awk -F'|' '$2 != "" && $3 != "sidebar" {print $1}')
+
+  if [[ "$target_window" != "$WINDOW" ]]; then
+    local sidebar
+    sidebar=$(sidebar_pane)
+    [[ -n "$sidebar" ]] && tmux move-pane -h -s "$target" -t "$sidebar" >/dev/null 2>&1 || true
+  fi
+
+  tmux select-window -t "$SESSION:$WINDOW" >/dev/null 2>&1 || true
+  tmux select-pane -t "$target" >/dev/null 2>&1 || true
 }
 
 agent_activity() {
@@ -319,7 +453,7 @@ agent_activity() {
   [[ -z "$idx" ]] && { echo "none"; return; }
 
   local pane_pid
-  pane_pid=$(tmux display-message -p -t "$SESSION:$WINDOW.$idx" '#{pane_pid}' 2>/dev/null)
+  pane_pid=$(tmux display-message -p -t "$idx" '#{pane_pid}' 2>/dev/null)
   [[ -z "$pane_pid" ]] && { echo "none"; return; }
 
   local tree agent_pid
@@ -334,6 +468,27 @@ agent_activity() {
   fi
 }
 
+sidebar_items() {
+  local active
+  active=$(active_agent_pane)
+
+  tmux list-panes -a -F '#{session_name}|#{pane_id}|#{@proj}|#{@rel}|#{@role}' 2>/dev/null \
+    | awk -F'|' -v s="$SESSION" '$1 == s && $4 != "" && $5 != "sidebar" {print $2 "|" $3 "|" $4}' \
+    | sort -t'|' -k2,2 \
+    | while IFS='|' read -r pane title rel; do
+      local marker=" "
+      [[ "$pane" == "$active" ]] && marker=">"
+
+      local status="○"
+      if [[ "$pane" == "$active" ]]; then
+        status="●"
+      fi
+      [[ "$(agent_activity "$rel")" == "working" ]] && status="⚙"
+
+      printf '%s %s %s\t%s\n' "$marker" "$status" "$title" "$pane"
+    done
+}
+
 walker_pick() {
   local prompt="$1"
   walker -d -p "$prompt" 2>/dev/null || true
@@ -342,6 +497,31 @@ walker_pick() {
 walker_input() {
   local prompt="$1"
   printf '' | walker -d -p "$prompt" 2>/dev/null || true
+}
+
+sidebar_loop() {
+  if command -v fzf >/dev/null 2>&1; then
+    while :; do
+      local picked pane
+      picked=$(sidebar_items \
+        | fzf --delimiter=$'\t' --with-nth=1 --layout=reverse-list --cycle --no-clear --prompt='' --info=hidden) || true
+      pane="${picked##*$'\t'}"
+      [[ -n "$pane" ]] && "$0" --activate-pane "$pane" >/dev/null 2>&1 || true
+    done
+  fi
+
+  while :; do
+    clear
+    printf 'Coding agents\n\n'
+    sidebar_items | cut -f1 | nl -w2 -s'  '
+    printf '\nSelect number, or use Super+I\n> '
+    local num line pane
+    IFS= read -r num || exit 0
+    [[ "$num" =~ ^[0-9]+$ ]] || continue
+    line=$(sidebar_items | sed -n "${num}p")
+    pane="${line##*$'\t'}"
+    [[ -n "$pane" ]] && "$0" --activate-pane "$pane" >/dev/null 2>&1 || true
+  done
 }
 
 list_projects() {
@@ -429,7 +609,7 @@ open_project() {
   local dir
   dir=$(resolve_dir "$rel")
   local agent
-  agent=$(project_agent "$rel" "$dir")
+  agent=$(project_agent "$rel")
   local cmd
   cmd=$(agent_cmd "$agent")
   command -v "$cmd" >/dev/null 2>&1 || fail "Selected agent command not found: $cmd"
@@ -452,65 +632,50 @@ open_project() {
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
     if tmux has-session -t "$SESSION" 2>/dev/null; then
-      tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
-      tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
-      tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
       local first_idx
-      first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_index}' 2>/dev/null | head -1 || true)
+      first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
       if [[ -n "$first_idx" ]]; then
-        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @proj "$title" >/dev/null 2>&1 || true
-        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @rel "$rel" >/dev/null 2>&1 || true
-        tmux set-option -p -t "$SESSION:$WINDOW.$first_idx" @agent "$agent" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$first_idx" @proj "$title" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$first_idx" @rel "$rel" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$first_idx" @agent "$agent" >/dev/null 2>&1 || true
       fi
+      setup_tmux_ui
+      activate_pane "$first_idx"
       log "created session=$SESSION pane=$title"
       save_session
     fi
   else
-    tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
-    tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
-    tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
+    setup_tmux_ui
     local idx
     idx=$(find_pane "$title" || true)
     if [[ -z "$idx" ]]; then
-      if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
-        tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
-      fi
-      tmux split-window -t "$SESSION:$WINDOW" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
+      ensure_hidden_window
+      local hidden
+      hidden=$(hidden_placeholder_pane)
+      tmux split-window -t "$hidden" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
       local new_idx
-      new_idx=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_index}' || true)
+      new_idx=$(tmux display-message -p -t "$SESSION:$HIDDEN_WINDOW" '#{pane_id}' || true)
       if [[ -n "$new_idx" ]]; then
-        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @proj "$title" >/dev/null 2>&1 || true
-        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @rel "$rel" >/dev/null 2>&1 || true
-        tmux set-option -p -t "$SESSION:$WINDOW.$new_idx" @agent "$agent" >/dev/null 2>&1 || true
-        tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
+        tmux set-option -p -t "$new_idx" @proj "$title" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$new_idx" @rel "$rel" >/dev/null 2>&1 || true
+        tmux set-option -p -t "$new_idx" @agent "$agent" >/dev/null 2>&1 || true
+        activate_pane "$new_idx"
         log "added pane=$title idx=$new_idx"
         save_session
       fi
     else
-      if [[ "$(tmux display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)" == "1" ]]; then
-        tmux resize-pane -t "$SESSION:$WINDOW" -Z >/dev/null 2>&1 || true
-      fi
-      tmux select-pane -t "$SESSION:$WINDOW.$idx" 2>&1 | tee -a "$LOG" >/dev/null || true
+      activate_pane "$idx"
       log "selected pane=$title idx=$idx"
     fi
   fi
 
+  refresh_sidebar
+
   if tmux list-clients -t "$SESSION" 2>/dev/null | grep -q .; then
-    hyprctl dispatch focuswindow "title:$WIN_TITLE" >/dev/null 2>&1 || true
+    focus_launcher_window
     log "focused existing window"
   else
-    if command -v uwsm-app >/dev/null 2>&1; then
-      setsid uwsm-app -- "$TERM_CMD" \
-        --title="$WIN_TITLE" \
-        -e tmux attach -t "$SESSION" \
-        >/dev/null 2>&1 &
-    else
-      setsid "$TERM_CMD" \
-        --title="$WIN_TITLE" \
-        -e tmux attach -t "$SESSION" \
-        >/dev/null 2>&1 &
-    fi
-    log "launched $TERM_CMD pid=$!"
+    launch_terminal_once
   fi
 }
 
@@ -555,10 +720,9 @@ set_project_agent() {
   [[ -z "$agent" ]] && exit 0
   agent_supported "$agent" || fail "Unsupported agent: $agent"
 
-  mkdir -p "$dir/.agents"
-  printf '%s\n' "$agent" > "$dir/$PROJECT_AGENT_FILE"
+  set_config_agent "$rel" "$agent"
   notify "Agent for $rel: $agent (reopen pane to apply)"
-  log "set project agent: rel=$rel agent=$agent file=$dir/$PROJECT_AGENT_FILE"
+  log "set project agent: rel=$rel agent=$agent file=$CONFIG_FILE"
 }
 
 list_git_projects() {
@@ -668,8 +832,7 @@ delete_project_or_worktree() {
   local idx
   idx=$(find_pane "$title")
   if [[ -n "$idx" ]]; then
-    tmux kill-pane -t "$SESSION:$WINDOW.$idx" 2>/dev/null || true
-    tmux select-layout -t "$SESSION:$WINDOW" tiled >/dev/null 2>&1 || true
+    tmux kill-pane -t "$idx" 2>/dev/null || true
     log "killed pane=$rel idx=$idx"
     save_session
   fi
@@ -688,9 +851,20 @@ delete_project_or_worktree() {
     notify "Deleted project: $rel"
     log "deleted project: $rel ($dir)"
   fi
+
+  refresh_sidebar
 }
 
 main() {
+  if [[ "${1:-}" == "--sidebar" ]]; then
+    sidebar_loop
+    return
+  fi
+  if [[ "${1:-}" == "--activate-pane" ]]; then
+    shift
+    [[ -n "${1:-}" ]] && activate_pane "$1"
+    return
+  fi
   if [[ "${1:-}" == "--worktree-dir" ]]; then
     shift
     resolve_worktree_dir "$@"

@@ -2,7 +2,7 @@
 
 A keyboard-driven project launcher for terminal coding agents on [omarchy](https://omarchy.org/) / Hyprland.
 
-Press **Super+I**, pick a project, and your selected coding agent opens in a tmux pane. All projects share one terminal and one tmux session, so active sessions stay together and can be restored after the terminal closes.
+Press **Super+I**, pick a project, and your selected coding agent opens in the right side of a tmux workspace. Open agents are listed in a left sidebar, and inactive agents keep running in the background.
 
 ![coding-agent-launcher walker picker](docs/screenshot.png)
 
@@ -15,7 +15,7 @@ Select the agent with `CODING_AGENT_LAUNCHER_AGENT`:
 - `gemini`
 - `opencode`
 
-Set a per-project agent by writing `claude`, `codex`, `gemini`, or `opencode` to `.agents/agent` in the project directory. The launcher also provides `+ Set project agent...` in the picker to write this file for you. Projects without `.agents/agent` use `CODING_AGENT_LAUNCHER_AGENT`.
+Set a per-project agent with `+ Set project agent...` in the picker. The launcher stores these preferences in `~/.coding-agent-launcher`, so project directories do not need launcher-specific files. Projects without a saved preference use `CODING_AGENT_LAUNCHER_AGENT`.
 
 The launcher manages projects and tmux panes; each agent still owns its own authentication, model configuration, permissions, and session storage.
 
@@ -34,9 +34,10 @@ This launcher collapses that to one keystroke and keeps every project in a singl
 
 ## How it works
 
-- A single tmux session named `coding-agents` holds one tiled pane per project.
+- A single tmux session named `coding-agents` shows a left sidebar and the selected agent pane on the right.
+- Inactive agent panes are parked in an internal `agents-hidden` tmux window so their processes keep running.
 - On first use the launcher spawns a terminal attached to that session.
-- Subsequent invocations add or switch to project panes inside the same terminal, and raise that terminal via `hyprctl`.
+- Subsequent invocations add or switch the right-side agent pane inside the same terminal, and raise that terminal via `hyprctl`.
 - New worktrees are created under `.agents/worktrees/<name>`.
 - Existing `.claude/worktrees` entries are left in place for Claude Code compatibility and appear as `project [name @claude]` if present.
 
@@ -44,6 +45,7 @@ This launcher collapses that to one keystroke and keeps every project in a singl
 
 - [omarchy](https://omarchy.org/) or any Hyprland setup with `walker`, `hyprctl`, and a supported terminal
 - `tmux`
+- `fzf` is optional, but recommended for mouse-friendly selection in the left sidebar
 - One supported coding agent CLI: `claude`, `codex`, `gemini`, or `opencode`
 - A terminal emulator supporting `--title` and `-e` (alacritty / ghostty / foot / kitty)
 
@@ -100,6 +102,8 @@ Press **Super+I**. A walker popup appears with:
 
 ### Switching projects inside the terminal
 
+The left sidebar lists open agents. If `fzf` is installed, use the mouse or keyboard to pick an agent from that list. Without `fzf`, type the number shown next to an agent and press Enter.
+
 With omarchy's default tmux config:
 
 - `Alt+Left` / `Alt+Right` - previous / next pane or window, depending on your tmux config
@@ -117,6 +121,7 @@ All configuration is via environment variables. Add these to your shell profile 
 | `CODING_AGENT_LAUNCHER_DEFAULT_NS` | *(unset)* | Fallback namespace when creating a bare project name |
 | `CODING_AGENT_LAUNCHER_TERMINAL` | `$TERMINAL`, else `alacritty` | Terminal emulator |
 | `CODING_AGENT_LAUNCHER_SESSION` | `coding-agents` | tmux session name |
+| `CODING_AGENT_LAUNCHER_CONFIG` | `$HOME/.coding-agent-launcher` | Launcher config file |
 | `CODING_AGENT_LAUNCHER_AGENT_ARGS` | *(empty)* | Extra arguments passed to every agent invocation |
 | `CODING_AGENT_LAUNCHER_CLAUDE_ARGS` | *(empty)* | Extra arguments for `claude` |
 | `CODING_AGENT_LAUNCHER_CODEX_ARGS` | *(empty)* | Extra arguments for `codex` |
@@ -128,19 +133,20 @@ Common args are applied before agent-specific args.
 
 ### Per-Project Agents
 
-Create this file inside a project to override `CODING_AGENT_LAUNCHER_AGENT` for that project:
+Use `+ Set project agent...` to override `CODING_AGENT_LAUNCHER_AGENT` for a project or worktree. Settings are stored in:
 
 ```text
-.agents/agent
+~/.coding-agent-launcher
 ```
 
-The file should contain one supported agent name:
+The file uses one tab-separated record per setting:
 
 ```text
-codex
+agent	komagata/app	codex
+agent	fjordllc/bootcamp [fix-ci]	claude
 ```
 
-Worktrees can have their own `.agents/agent`. If a worktree does not define one, it inherits the parent project's `.agents/agent` when present.
+Worktrees can have their own setting. If a worktree does not define one, it inherits the parent project's setting when present.
 
 Changing this setting affects new panes. If the project is already open in tmux, close that pane and open the project again to start the newly selected agent.
 
