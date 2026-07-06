@@ -10,10 +10,12 @@ Claude Code / Codex / Gemini CLI / OpenCode などの terminal coding agent を�
 
 ## アーキテクチャ
 
-- **1 キーバインド（Super+I）** → walker popup でプロジェクト選択 → tmux の右 pane に選択中 agent が表示
-- **単一 tmux セッション** `coding-agents` を維持し、左 sidebar + 右 active agent pane で管理
-- 非 active agent pane は `agents-hidden` window に退避し、プロセスを生かしたまま切り替える
-- 初回: terminal を起動して session attach / 2回目以降: 同じ terminal 内に pane 追加 + `hyprctl` でフォーカス
+- **1 キーバインド（Super+I）** → walker popup でプロジェクト選択 → 該当 tmux window に切り替え
+- **単一 tmux セッション** `coding-agents` を維持し、**1 プロジェクト = 1 window** で管理（pane 移動はしない）
+- tmux status line が開いているプロジェクトの一覧を兼ねる。`mouse on` なので window 名クリックで切り替え可能（tmux 標準機能）
+- window 名にアクティビティマーカー（`⚙` = working）を付け、launcher 操作のたびに `refresh_ui` で rename する
+- status line の見た目（`window-status-format` 等）はユーザーの tmux 設定に任せ、launcher は `mouse on` と `status on` しか設定しない
+- 初回: terminal を起動して session attach / 2回目以降: 同じ terminal 内に window 追加・切替 + `hyprctl` でフォーカス
 - 起動 agent は `CODING_AGENT_LAUNCHER_AGENT` で固定選択。未設定時は `claude`
 - プロジェクトごとの agent は `~/.coding-agent-launcher` で上書きできる。worktree は自身の設定がなければ親 project の設定を継承する
 - agent 固有の会話履歴・認証・model 設定は各 CLI 側に任せる

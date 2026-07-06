@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # coding-agent-launcher — A project launcher for coding agents on omarchy/Hyprland.
 #
-# Design: A single tmux session (default name "coding-agents") keeps a sidebar
-# pane on the left and the selected coding-agent pane on the right. Inactive
-# agent panes are parked in a hidden tmux window so their processes keep running.
+# Design: A single tmux session (default name "coding-agents") holds one tmux
+# window per project. Switching projects is a native window switch, and the
+# tmux status line doubles as a clickable project list (mouse on).
 #
 # Directory layout (required): $CODING_AGENT_LAUNCHER_WORKS_DIR/<namespace>/<name>/
 
@@ -13,8 +13,6 @@ APP_NAME="coding-agent-launcher"
 WORKS="${CODING_AGENT_LAUNCHER_WORKS_DIR:-$HOME/Projects}"
 DEFAULT_NS="${CODING_AGENT_LAUNCHER_DEFAULT_NS:-}"
 SESSION="${CODING_AGENT_LAUNCHER_SESSION:-coding-agents}"
-WINDOW="agents"
-HIDDEN_WINDOW="agents-hidden"
 TERM_CMD="${CODING_AGENT_LAUNCHER_TERMINAL:-${TERMINAL:-alacritty}}"
 AGENT="${CODING_AGENT_LAUNCHER_AGENT:-claude}"
 COMMON_ARGS="${CODING_AGENT_LAUNCHER_AGENT_ARGS:-}"
@@ -363,84 +361,29 @@ find_pane() {
     | awk -F'|' -v s="$SESSION" -v t="$title" '$1 == s && $3 == t {print $2; exit}' || true
 }
 
-ensure_sidebar() {
-  local sidebar
-  sidebar=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
-    | awk -F'|' '$2 == "sidebar" {print $1; exit}' || true)
-  [[ -n "$sidebar" ]] && return 0
-
-  local first
-  first=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
-  [[ -n "$first" ]] || return 0
-  tmux split-window -h -b -l 28 -t "$first" "$0 --sidebar" >/dev/null 2>&1 || true
-  sidebar=$(tmux display-message -p -t "$SESSION:$WINDOW" '#{pane_id}' 2>/dev/null || true)
-  [[ -n "$sidebar" ]] && tmux set-option -p -t "$sidebar" @role "sidebar" >/dev/null 2>&1 || true
-}
-
-ensure_hidden_window() {
-  tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -Fxq "$HIDDEN_WINDOW" && return 0
-  tmux new-window -d -t "$SESSION" -n "$HIDDEN_WINDOW" "sleep 2147483647" >/dev/null 2>&1 || true
-  local pane
-  pane=$(tmux list-panes -t "$SESSION:$HIDDEN_WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
-  [[ -n "$pane" ]] && tmux set-option -p -t "$pane" @role "hidden-placeholder" >/dev/null 2>&1 || true
-}
-
-hidden_placeholder_pane() {
-  tmux list-panes -t "$SESSION:$HIDDEN_WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
-    | awk -F'|' '$2 == "hidden-placeholder" {print $1; exit}' || true
-}
-
-# fzf reads sidebar_items once per loop iteration and doesn't auto-refresh, so
-# any pane add/remove/switch elsewhere leaves it showing a stale (possibly
-# empty) list until the sidebar pane is force-restarted.
-refresh_sidebar() {
-  local sidebar
-  sidebar=$(sidebar_pane)
-  [[ -n "$sidebar" ]] || return 0
-  tmux respawn-pane -k -t "$sidebar" "$0 --sidebar" >/dev/null 2>&1 || true
-}
-
+# One project = one tmux window. The status line is the project list: with
+# mouse on, clicking a window name there switches projects natively. Its look
+# is left to the user's tmux config.
 setup_tmux_ui() {
-  tmux set-option -t "$SESSION" -g mouse on >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g pane-border-lines heavy >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g pane-border-format " #{?#{@proj},#{@proj},#{b:pane_current_path}} " >/dev/null 2>&1 || true
-  ensure_hidden_window
-  ensure_sidebar
+  tmux set-option -t "$SESSION" mouse on >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" status on >/dev/null 2>&1 || true
 }
 
-sidebar_pane() {
-  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@role}' 2>/dev/null \
-    | awk -F'|' '$2 == "sidebar" {print $1; exit}' || true
-}
-
-active_agent_pane() {
-  tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@rel}|#{@role}' 2>/dev/null \
-    | awk -F'|' '$2 != "" && $3 != "sidebar" {print $1; exit}' || true
+# Window names carry the activity marker, so refreshing the UI is renaming
+# windows — the status line redraws itself, nothing is respawned.
+refresh_ui() {
+  tmux list-panes -a -F '#{session_name}|#{window_id}|#{@rel}|#{@proj}' 2>/dev/null \
+    | awk -F'|' -v s="$SESSION" '$1 == s && $3 != "" {print $2 "|" $3 "|" $4}' \
+    | while IFS='|' read -r win rel proj; do
+      local marker=""
+      [[ "$(agent_activity "$rel")" == "working" ]] && marker="⚙ "
+      tmux rename-window -t "$win" "${marker}${proj}" >/dev/null 2>&1 || true
+    done
 }
 
 activate_pane() {
   local target="$1"
-  local target_window
-  target_window=$(tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null || true)
-  [[ -z "$target_window" ]] && return 0
-
-  local hidden current
-  hidden=$(hidden_placeholder_pane)
-  while IFS= read -r current; do
-    [[ -n "$current" && "$current" != "$target" && -n "$hidden" ]] || continue
-    tmux move-pane -h -s "$current" -t "$hidden" >/dev/null 2>&1 || true
-  done < <(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}|#{@rel}|#{@role}' 2>/dev/null \
-    | awk -F'|' '$2 != "" && $3 != "sidebar" {print $1}')
-
-  if [[ "$target_window" != "$WINDOW" ]]; then
-    local sidebar
-    sidebar=$(sidebar_pane)
-    [[ -n "$sidebar" ]] && tmux move-pane -h -s "$target" -t "$sidebar" >/dev/null 2>&1 || true
-  fi
-
-  tmux select-window -t "$SESSION:$WINDOW" >/dev/null 2>&1 || true
+  tmux select-window -t "$target" >/dev/null 2>&1 || true
   tmux select-pane -t "$target" >/dev/null 2>&1 || true
 }
 
@@ -468,27 +411,6 @@ agent_activity() {
   fi
 }
 
-sidebar_items() {
-  local active
-  active=$(active_agent_pane)
-
-  tmux list-panes -a -F '#{session_name}|#{pane_id}|#{@proj}|#{@rel}|#{@role}' 2>/dev/null \
-    | awk -F'|' -v s="$SESSION" '$1 == s && $4 != "" && $5 != "sidebar" {print $2 "|" $3 "|" $4}' \
-    | sort -t'|' -k2,2 \
-    | while IFS='|' read -r pane title rel; do
-      local marker=" "
-      [[ "$pane" == "$active" ]] && marker=">"
-
-      local status="○"
-      if [[ "$pane" == "$active" ]]; then
-        status="●"
-      fi
-      [[ "$(agent_activity "$rel")" == "working" ]] && status="⚙"
-
-      printf '%s %s %s\t%s\n' "$marker" "$status" "$title" "$pane"
-    done
-}
-
 walker_pick() {
   local prompt="$1"
   walker -d -p "$prompt" 2>/dev/null || true
@@ -497,31 +419,6 @@ walker_pick() {
 walker_input() {
   local prompt="$1"
   printf '' | walker -d -p "$prompt" 2>/dev/null || true
-}
-
-sidebar_loop() {
-  if command -v fzf >/dev/null 2>&1; then
-    while :; do
-      local picked pane
-      picked=$(sidebar_items \
-        | fzf --delimiter=$'\t' --with-nth=1 --layout=reverse-list --cycle --no-clear --prompt='' --info=hidden) || true
-      pane="${picked##*$'\t'}"
-      [[ -n "$pane" ]] && "$0" --activate-pane "$pane" >/dev/null 2>&1 || true
-    done
-  fi
-
-  while :; do
-    clear
-    printf 'Coding agents\n\n'
-    sidebar_items | cut -f1 | nl -w2 -s'  '
-    printf '\nSelect number, or use Super+I\n> '
-    local num line pane
-    IFS= read -r num || exit 0
-    [[ "$num" =~ ^[0-9]+$ ]] || continue
-    line=$(sidebar_items | sed -n "${num}p")
-    pane="${line##*$'\t'}"
-    [[ -n "$pane" ]] && "$0" --activate-pane "$pane" >/dev/null 2>&1 || true
-  done
 }
 
 list_projects() {
@@ -629,19 +526,20 @@ open_project() {
   log "=== $(date) ==="
   log "agent=$agent rel=$rel dir=$dir title=$title is_wt=$is_wt"
 
+  local shell_cmd="bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }"
+
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux new-session -d -s "$SESSION" -n "$WINDOW" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
+    tmux new-session -d -s "$SESSION" -n "$title" -c "$dir" "$shell_cmd" 2>&1 | tee -a "$LOG" >/dev/null || true
     if tmux has-session -t "$SESSION" 2>/dev/null; then
       local first_idx
-      first_idx=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}' 2>/dev/null | head -1 || true)
+      first_idx=$(tmux list-panes -t "$SESSION" -F '#{pane_id}' 2>/dev/null | head -1 || true)
       if [[ -n "$first_idx" ]]; then
         tmux set-option -p -t "$first_idx" @proj "$title" >/dev/null 2>&1 || true
         tmux set-option -p -t "$first_idx" @rel "$rel" >/dev/null 2>&1 || true
         tmux set-option -p -t "$first_idx" @agent "$agent" >/dev/null 2>&1 || true
       fi
       setup_tmux_ui
-      activate_pane "$first_idx"
-      log "created session=$SESSION pane=$title"
+      log "created session=$SESSION window=$title"
       save_session
     fi
   else
@@ -649,27 +547,22 @@ open_project() {
     local idx
     idx=$(find_pane "$title" || true)
     if [[ -z "$idx" ]]; then
-      ensure_hidden_window
-      local hidden
-      hidden=$(hidden_placeholder_pane)
-      tmux split-window -t "$hidden" -c "$dir" "bash -lc '$inner' || { echo 'Command failed. Press any key to close.'; read -n 1; }" 2>&1 | tee -a "$LOG" >/dev/null || true
       local new_idx
-      new_idx=$(tmux display-message -p -t "$SESSION:$HIDDEN_WINDOW" '#{pane_id}' || true)
+      new_idx=$(tmux new-window -t "$SESSION" -n "$title" -c "$dir" -P -F '#{pane_id}' "$shell_cmd" 2>>"$LOG" || true)
       if [[ -n "$new_idx" ]]; then
         tmux set-option -p -t "$new_idx" @proj "$title" >/dev/null 2>&1 || true
         tmux set-option -p -t "$new_idx" @rel "$rel" >/dev/null 2>&1 || true
         tmux set-option -p -t "$new_idx" @agent "$agent" >/dev/null 2>&1 || true
-        activate_pane "$new_idx"
-        log "added pane=$title idx=$new_idx"
+        log "added window=$title pane=$new_idx"
         save_session
       fi
     else
       activate_pane "$idx"
-      log "selected pane=$title idx=$idx"
+      log "selected window=$title pane=$idx"
     fi
   fi
 
-  refresh_sidebar
+  refresh_ui
 
   if tmux list-clients -t "$SESSION" 2>/dev/null | grep -q .; then
     focus_launcher_window
@@ -852,19 +745,10 @@ delete_project_or_worktree() {
     log "deleted project: $rel ($dir)"
   fi
 
-  refresh_sidebar
+  refresh_ui
 }
 
 main() {
-  if [[ "${1:-}" == "--sidebar" ]]; then
-    sidebar_loop
-    return
-  fi
-  if [[ "${1:-}" == "--activate-pane" ]]; then
-    shift
-    [[ -n "${1:-}" ]] && activate_pane "$1"
-    return
-  fi
   if [[ "${1:-}" == "--worktree-dir" ]]; then
     shift
     resolve_worktree_dir "$@"

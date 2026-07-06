@@ -2,7 +2,7 @@
 
 A keyboard-driven project launcher for terminal coding agents on [omarchy](https://omarchy.org/) / Hyprland.
 
-Press **Super+I**, pick a project, and your selected coding agent opens in the right side of a tmux workspace. Open agents are listed in a left sidebar, and inactive agents keep running in the background.
+Press **Super+I**, pick a project, and your selected coding agent opens in its own tmux window. Open agents are listed in the tmux status line, and every agent keeps running while you switch between them.
 
 ![coding-agent-launcher walker picker](docs/screenshot.png)
 
@@ -17,7 +17,7 @@ Select the agent with `CODING_AGENT_LAUNCHER_AGENT`:
 
 Set a per-project agent with `+ Set project agent...` in the picker. The launcher stores these preferences in `~/.coding-agent-launcher`, so project directories do not need launcher-specific files. Projects without a saved preference use `CODING_AGENT_LAUNCHER_AGENT`.
 
-The launcher manages projects and tmux panes; each agent still owns its own authentication, model configuration, permissions, and session storage.
+The launcher manages projects and tmux windows; each agent still owns its own authentication, model configuration, permissions, and session storage.
 
 For `claude`, `codex`, and `gemini`, the launcher resumes the most recent conversation for the project directory when possible and starts a fresh session otherwise.
 
@@ -34,10 +34,10 @@ This launcher collapses that to one keystroke and keeps every project in a singl
 
 ## How it works
 
-- A single tmux session named `coding-agents` shows a left sidebar and the selected agent pane on the right.
-- Inactive agent panes are parked in an internal `agents-hidden` tmux window so their processes keep running.
+- A single tmux session named `coding-agents` holds one tmux window per project, so switching projects is a native tmux window switch.
+- The tmux status line lists the open projects; a `⚙` prefix marks agents that are currently working. With tmux `mouse on`, clicking a name in the status line switches to that project.
 - On first use the launcher spawns a terminal attached to that session.
-- Subsequent invocations add or switch the right-side agent pane inside the same terminal, and raise that terminal via `hyprctl`.
+- Subsequent invocations add or switch windows inside the same terminal, and raise that terminal via `hyprctl`.
 - New worktrees are created under `.agents/worktrees/<name>`.
 - Existing `.claude/worktrees` entries are left in place for Claude Code compatibility and appear as `project [name @claude]` if present.
 
@@ -45,7 +45,6 @@ This launcher collapses that to one keystroke and keeps every project in a singl
 
 - [omarchy](https://omarchy.org/) or any Hyprland setup with `walker`, `hyprctl`, and a supported terminal
 - `tmux`
-- `fzf` is optional, but recommended for mouse-friendly selection in the left sidebar
 - One supported coding agent CLI: `claude`, `codex`, `gemini`, or `opencode`
 - A terminal emulator supporting `--title` and `-e` (alacritty / ghostty / foot / kitty)
 
@@ -92,21 +91,19 @@ Press **Super+I**. A walker popup appears with:
   komagata/rom-sorter       (not open)
 ```
 
-- **Select an existing project** to switch to its tmux pane, creating it if needed.
+- **Select an existing project** to switch to its tmux window, creating it if needed.
 - **Select `+ New project...`** to create `$CODING_AGENT_LAUNCHER_WORKS_DIR/<ns>/<name>/` and start the selected agent there.
 - **Select `+ New worktree...`** to create a git worktree under `.agents/worktrees/<name>`.
 - **Select `+ Set project agent...`** to choose which agent a project or worktree should use.
 - **Type a name that is not listed** to create it on the spot. With `CODING_AGENT_LAUNCHER_DEFAULT_NS=me`, typing `chat` creates `$CODING_AGENT_LAUNCHER_WORKS_DIR/me/chat/`; otherwise use `ns/name`.
 
-![terminal showing multiple project panes in tmux](docs/terminal.png)
+![terminal showing project windows in tmux](docs/terminal.png)
 
 ### Switching projects inside the terminal
 
-The left sidebar lists open agents. If `fzf` is installed, use the mouse or keyboard to pick an agent from that list. Without `fzf`, type the number shown next to an agent and press Enter.
+The tmux status line lists the open projects. Click a name to switch to it (the launcher enables tmux `mouse on`), or use standard tmux window keys:
 
-With omarchy's default tmux config:
-
-- `Alt+Left` / `Alt+Right` - previous / next pane or window, depending on your tmux config
+- `Ctrl+B n` / `Ctrl+B p` - next / previous window
 - `Ctrl+B w` - window picker
 - `Ctrl+B d` - detach and keep everything running in the background
 
@@ -148,7 +145,7 @@ agent	fjordllc/bootcamp [fix-ci]	claude
 
 Worktrees can have their own setting. If a worktree does not define one, it inherits the parent project's setting when present.
 
-Changing this setting affects new panes. If the project is already open in tmux, close that pane and open the project again to start the newly selected agent.
+Changing this setting affects newly opened windows. If the project is already open in tmux, close that window and open the project again to start the newly selected agent.
 
 ### Directory layout
 
@@ -173,7 +170,7 @@ coding-agent-launcher --restore
 coding-agent-launcher --shutdown
 ```
 
-`--shutdown` asks each active agent pane to write a handover note to `HANDOVER.md`, waits briefly for activity to stop, saves the session list, and kills the tmux session.
+`--shutdown` asks each open agent to write a handover note to `HANDOVER.md`, waits briefly for activity to stop, saves the session list, and kills the tmux session.
 
 ## Shell helpers
 
